@@ -42,6 +42,22 @@ ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alte
 - **Process exclusion** - Prevent proxy loops by excluding proxy applications
 - **Import/Export rules** - Share rule configurations across systems with JSON-based import/export
 
+> [!CAUTION]
+> **Beware of Fake ProxyBridge Downloads**
+>
+> Multiple **fake ProxyBridge download sources** have been identified. Some of these sources distribute **unwanted binaries** and **malicious software**.
+>
+> ❌ **Do NOT download ProxyBridge from any third-party or unofficial sources.**
+>
+> ✅ **Official ProxyBridge sources (only):**
+> - GitHub Repository: https://github.com/InterceptSuite/ProxyBridge/
+> - Official Website: [https://interceptsuite.com/download/proxybridge](https://interceptsuite.com/download/proxybridge)
+>
+> If you prefer not to use prebuilt binaries, you may safely build ProxyBridge yourself by following the **Contribution Guide** and compiling directly from the **official source code**.
+> 
+> ProxyBridge does not communicate with any external servers except the GitHub API for update checks (triggered only on app launch or manual update checks);
+
+
 
 ## Platform Documentation
 
