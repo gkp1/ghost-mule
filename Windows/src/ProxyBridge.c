@@ -12,14 +12,15 @@
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
-#define MAXBUF 0xFFFF
+#define MAXBUF 1500  // Optimized for typical MTU (WinDivert performance recommendation)
+#define PACKET_BATCH_SIZE 64  // Batch mode: process multiple packets per context switch
 #define LOCAL_PROXY_PORT 34010
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
 #define MAX_PROCESS_NAME 256
 #define VERSION "3.1.0"
 #define PID_CACHE_SIZE 1024
 #define PID_CACHE_TTL_MS 1000
-#define NUM_PACKET_THREADS 4
+#define NUM_PACKET_THREADS 4  // Multi-threading for parallel packet processing
 #define CONNECTION_HASH_SIZE 256
 #define SOCKS5_BUFFER_SIZE 1024
 #define HTTP_BUFFER_SIZE 1024
@@ -304,7 +305,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     UINT32 dest_ip = ip_header->DstAddr;
                     UINT16 dest_port = ntohs(udp_header->DstPort);
 
-                    // if no rule configuree all connection direct with no checks avoid unwanted memory and pocessing whcich could delay
+                    // if no rule configured all connection direct with no checks avoid unwanted memory and processing which could delay
                     if (!g_has_active_rules && g_connection_callback == NULL)
                     {
                         // No rules and no logging - pass through immediately (no checksum needed for unmodified packets)
@@ -447,7 +448,7 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 UINT32 orig_dest_ip = ip_header->DstAddr;
                 UINT16 orig_dest_port = ntohs(tcp_header->DstPort);
 
-                // avoid rule pocess and packet process if no rules
+                // avoid rule process and packet process if no rules
                 if (!g_has_active_rules && g_connection_callback == NULL)
                 {
                     WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
@@ -518,14 +519,14 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     continue;
                 }
                 else if (action == RULE_ACTION_PROXY)
-            {
-                add_connection(src_port, src_ip, orig_dest_ip, orig_dest_port);
+                {
+                    add_connection(src_port, src_ip, orig_dest_ip, orig_dest_port);
 
-                UINT32 temp_addr = ip_header->DstAddr;
-                tcp_header->DstPort = htons(g_local_relay_port);
-                ip_header->DstAddr = ip_header->SrcAddr;
-                ip_header->SrcAddr = temp_addr;
-                addr.Outbound = FALSE;
+                    UINT32 temp_addr = ip_header->DstAddr;
+                    tcp_header->DstPort = htons(g_local_relay_port);
+                    ip_header->DstAddr = ip_header->SrcAddr;
+                    ip_header->SrcAddr = temp_addr;
+                    addr.Outbound = FALSE;
                 }
             }
         }
@@ -2738,8 +2739,9 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
         return FALSE;
     }
 
-    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_LENGTH, 8192);
-    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_TIME, 8);  // 8ms for low latency
+    // Performance optimization: larger queue to prevent packet drops under heavy load (>= 1Gbps)
+    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_LENGTH, (UINT64)16384);  // Doubled queue length
+    WinDivertSetParam(windivert_handle, WINDIVERT_PARAM_QUEUE_TIME, (UINT64)2000);  // 2 seconds max queue time
 
     for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
