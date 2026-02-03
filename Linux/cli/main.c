@@ -107,14 +107,30 @@ int main(int argc, char *argv[])
     ProxyBridge_SetDnsViaProxy(dns_via_proxy);
     ProxyBridge_SetTrafficLoggingEnabled(true);
 
-    // add rule - curl tcp traffic via proxy
-    uint32_t rule_id = ProxyBridge_AddRule("curl", "*", "*", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY);
-    if (rule_id == 0)
+    // add rules - redirect specific apps to proxy
+    uint32_t rule_id1 = ProxyBridge_AddRule("curl", "*", "*", RULE_PROTOCOL_TCP, RULE_ACTION_PROXY);
+    if (rule_id1 == 0)
     {
         fprintf(stderr, "failed to add curl rule\n");
         return 1;
     }
-    printf("added rule id %u: curl tcp traffic via proxy\n", rule_id);
+    printf("added rule id %u: curl tcp traffic via proxy\n", rule_id1);
+
+    uint32_t rule_id2 = ProxyBridge_AddRule("nghttp", "*", "*", RULE_PROTOCOL_BOTH, RULE_ACTION_PROXY);
+    if (rule_id2 == 0)
+    {
+        fprintf(stderr, "failed to add nghttp rule\n");
+        return 1;
+    }
+    printf("added rule id %u: nghttp tcp+udp traffic via proxy\n", rule_id2);
+
+    uint32_t rule_id3 = ProxyBridge_AddRule("http3-client", "*", "*", RULE_PROTOCOL_UDP, RULE_ACTION_PROXY);
+    if (rule_id3 == 0)
+    {
+        fprintf(stderr, "failed to add http3-client rule\n");
+        return 1;
+    }
+    printf("added rule id %u: http3-client udp traffic via proxy\n", rule_id3);
 
     // test connection
     char test_result[2048];

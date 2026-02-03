@@ -96,11 +96,20 @@ static struct nfq_handle *nfq_h = NULL;
 static struct nfq_q_handle *nfq_qh = NULL;
 static pthread_t packet_thread[NUM_PACKET_THREADS] = {0};
 static pthread_t proxy_thread = 0;
+static pthread_t udp_relay_thread = 0;
 static pthread_t cleanup_thread = 0;
 static PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE] = {NULL};
 static bool g_has_active_rules = false;
 static bool running = false;
 static uint32_t g_current_process_id = 0;
+
+// UDP relay globals
+static int udp_relay_socket = -1;
+static int socks5_udp_control_socket = -1;
+static int socks5_udp_send_socket = -1;
+static struct sockaddr_in socks5_udp_relay_addr;
+static bool udp_associate_connected = false;
+static uint64_t last_udp_connect_attempt = 0;
 
 static bool g_traffic_logging_enabled = true;
 
@@ -270,7 +279,7 @@ static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_por
     req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
     req.r.sdiag_family = AF_INET;
     req.r.sdiag_protocol = is_udp ? IPPROTO_UDP : IPPROTO_TCP;
-    req.r.idiag_states = is_udp ? (1 << TCP_ESTABLISHED) : -1;
+    req.r.idiag_states = -1;  // All states (UDP is connectionless, doesn't have TCP states)
     req.r.idiag_ext = 0;
 
     struct sockaddr_nl sa;
@@ -379,6 +388,76 @@ static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_por
 
 done:
     close(fd);
+    
+    // Fallback for UDP: scan /proc/net/udp if netlink didn't find the socket
+    // This happens when UDP socket uses sendto() without connect()
+    if (matches_found == 0 && is_udp) {
+        
+        // Try both IPv4 and IPv6 (socket might be IPv6 sending IPv4 packets)
+        const char* udp_files[] = {"/proc/net/udp", "/proc/net/udp6"};
+        for (int file_idx = 0; file_idx < 2 && pid == 0; file_idx++) {
+            FILE *fp = fopen(udp_files[file_idx], "r");
+            if (fp) {
+                char line[512];
+                (void)fgets(line, sizeof(line), fp); // skip header
+                int entries_scanned = 0;
+                while (fgets(line, sizeof(line), fp)) {
+                    unsigned int local_addr, local_port;
+                    unsigned long inode;
+                    int uid_val;
+                    
+                    // Format: sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
+                    if (sscanf(line, "%*d: %X:%X %*X:%*X %*X %*X:%*X %*X:%*X %*X %d %*d %lu",
+                              &local_addr, &local_port, &uid_val, &inode) == 4) {
+                        entries_scanned++;
+                        
+                        if (local_port == src_port) {
+                        target_inode = inode;
+                        
+                        // Now find PID from /proc/*/fd/* with this inode
+                        DIR *proc_dir = opendir("/proc");
+                        if (proc_dir) {
+                            struct dirent *proc_entry;
+                            while ((proc_entry = readdir(proc_dir)) != NULL && pid == 0) {
+                                if (proc_entry->d_type == DT_DIR && isdigit(proc_entry->d_name[0])) {
+                                    char fd_path[256];
+                                    snprintf(fd_path, sizeof(fd_path), "/proc/%s/fd", proc_entry->d_name);
+                                    DIR *fd_dir = opendir(fd_path);
+                                    if (fd_dir) {
+                                        struct dirent *fd_entry;
+                                        while ((fd_entry = readdir(fd_dir)) != NULL && pid == 0) {
+                                            if (fd_entry->d_type == DT_LNK) {
+                                                char link_path[512];
+                                                snprintf(link_path, sizeof(link_path), "/proc/%s/fd/%s",
+                                                        proc_entry->d_name, fd_entry->d_name);
+                                                char link_target[256];
+                                                ssize_t link_len = readlink(link_path, link_target, sizeof(link_target) - 1);
+                                                if (link_len > 0) {
+                                                    link_target[link_len] = '\0';
+                                                    char expected[64];
+                                                    snprintf(expected, sizeof(expected), "socket:[%lu]", inode);
+                                                    if (strcmp(link_target, expected) == 0) {
+                                                        pid = (uint32_t)atoi(proc_entry->d_name);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        closedir(fd_dir);
+                                    }
+                                }
+                            }
+                            closedir(proc_dir);
+                        }
+                        break;
+                    }
+                }
+            }
+            fclose(fp);
+        }
+        }
+    }
+    
     if (pid != 0)
         cache_pid(src_ip, src_port, pid, is_udp);
     return pid;
@@ -1056,6 +1135,304 @@ static void* local_proxy_server(void *arg)
     return NULL;
 }
 
+// SOCKS5 UDP ASSOCIATE
+static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
+{
+    unsigned char buf[512];
+    ssize_t len;
+    
+    // Auth handshake
+    bool use_auth = (g_proxy_username[0] != '\0');
+    buf[0] = SOCKS5_VERSION;
+    buf[1] = use_auth ? 0x02 : 0x01;
+    buf[2] = SOCKS5_AUTH_NONE;
+    if (use_auth)
+        buf[3] = 0x02;  // username/password auth
+    
+    if (send(s, buf, use_auth ? 4 : 3, 0) != (use_auth ? 4 : 3))
+        return -1;
+
+    len = recv(s, buf, 2, 0);
+    if (len != 2 || buf[0] != SOCKS5_VERSION)
+        return -1;
+
+    if (buf[1] == 0x02 && use_auth)
+    {
+        size_t ulen = strlen(g_proxy_username);
+        size_t plen = strlen(g_proxy_password);
+        buf[0] = 0x01;
+        buf[1] = (unsigned char)ulen;
+        memcpy(buf + 2, g_proxy_username, ulen);
+        buf[2 + ulen] = (unsigned char)plen;
+        memcpy(buf + 3 + ulen, g_proxy_password, plen);
+        
+        if (send(s, buf, 3 + ulen + plen, 0) != (ssize_t)(3 + ulen + plen))
+            return -1;
+
+        len = recv(s, buf, 2, 0);
+        if (len != 2 || buf[0] != 0x01 || buf[1] != 0x00)
+            return -1;
+    }
+    else if (buf[1] != SOCKS5_AUTH_NONE)
+        return -1;
+
+    // UDP ASSOCIATE request
+    buf[0] = SOCKS5_VERSION;
+    buf[1] = SOCKS5_CMD_UDP_ASSOCIATE;
+    buf[2] = 0x00;
+    buf[3] = SOCKS5_ATYP_IPV4;
+    memset(buf + 4, 0, 4);  // 0.0.0.0
+    memset(buf + 8, 0, 2);  // port 0
+
+    if (send(s, buf, 10, 0) != 10)
+        return -1;
+
+    len = recv(s, buf, 512, 0);
+    if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+        return -1;
+
+    // Extract relay address
+    if (buf[3] == SOCKS5_ATYP_IPV4)
+    {
+        memset(relay_addr, 0, sizeof(*relay_addr));
+        relay_addr->sin_family = AF_INET;
+        memcpy(&relay_addr->sin_addr.s_addr, buf + 4, 4);
+        memcpy(&relay_addr->sin_port, buf + 8, 2);
+        return 0;
+    }
+
+    return -1;
+}
+
+static bool establish_udp_associate(void)
+{
+    uint64_t now = get_monotonic_ms();
+    if (now - last_udp_connect_attempt < 5000)
+        return false;
+
+    last_udp_connect_attempt = now;
+
+    if (socks5_udp_control_socket >= 0)
+    {
+        close(socks5_udp_control_socket);
+        socks5_udp_control_socket = -1;
+    }
+    if (socks5_udp_send_socket >= 0)
+    {
+        close(socks5_udp_send_socket);
+        socks5_udp_send_socket = -1;
+    }
+
+    int tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_sock < 0)
+        return false;
+
+    configure_tcp_socket(tcp_sock, 262144, 3000);
+
+    uint32_t socks5_ip = resolve_hostname(g_proxy_host);
+    if (socks5_ip == 0)
+    {
+        close(tcp_sock);
+        return false;
+    }
+
+    struct sockaddr_in socks_addr;
+    memset(&socks_addr, 0, sizeof(socks_addr));
+    socks_addr.sin_family = AF_INET;
+    socks_addr.sin_addr.s_addr = socks5_ip;
+    socks_addr.sin_port = htons(g_proxy_port);
+
+    if (connect(tcp_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) < 0)
+    {
+        close(tcp_sock);
+        return false;
+    }
+
+    if (socks5_udp_associate(tcp_sock, &socks5_udp_relay_addr) != 0)
+    {
+        close(tcp_sock);
+        return false;
+    }
+
+    socks5_udp_control_socket = tcp_sock;
+
+    socks5_udp_send_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (socks5_udp_send_socket < 0)
+    {
+        close(socks5_udp_control_socket);
+        socks5_udp_control_socket = -1;
+        return false;
+    }
+
+    configure_udp_socket(socks5_udp_send_socket, 262144, 30000);
+
+    udp_associate_connected = true;
+    log_message("[UDP] ASSOCIATE established with SOCKS5 proxy");
+    return true;
+}
+
+static void* udp_relay_server(void *arg)
+{
+    (void)arg;
+    struct sockaddr_in local_addr, from_addr;
+    unsigned char recv_buf[65536];
+    unsigned char send_buf[65536];
+    socklen_t from_len;
+
+    udp_relay_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udp_relay_socket < 0)
+        return NULL;
+
+    int on = 1;
+    setsockopt(udp_relay_socket, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    configure_udp_socket(udp_relay_socket, 262144, 30000);
+
+    memset(&local_addr, 0, sizeof(local_addr));
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_addr.s_addr = INADDR_ANY;
+    local_addr.sin_port = htons(LOCAL_UDP_RELAY_PORT);
+
+    if (bind(udp_relay_socket, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0)
+    {
+        close(udp_relay_socket);
+        udp_relay_socket = -1;
+        return NULL;
+    }
+
+    udp_associate_connected = establish_udp_associate();
+
+    log_message("[UDP] relay listening on port %d", LOCAL_UDP_RELAY_PORT);
+    if (!udp_associate_connected)
+        log_message("[UDP] ASSOCIATE not available yet - will retry when needed");
+
+    while (running)
+    {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(udp_relay_socket, &read_fds);
+
+        int max_fd = udp_relay_socket;
+
+        if (udp_associate_connected && socks5_udp_send_socket >= 0)
+        {
+            FD_SET(socks5_udp_send_socket, &read_fds);
+            if (socks5_udp_send_socket > max_fd)
+                max_fd = socks5_udp_send_socket;
+        }
+
+        struct timeval timeout = {1, 0};
+
+        if (select(max_fd + 1, &read_fds, NULL, NULL, &timeout) <= 0)
+            continue;
+
+        // Client -> SOCKS5 proxy
+        if (FD_ISSET(udp_relay_socket, &read_fds))
+        {
+            from_len = sizeof(from_addr);
+            ssize_t recv_len = recvfrom(udp_relay_socket, recv_buf, sizeof(recv_buf), 0,
+                                        (struct sockaddr *)&from_addr, &from_len);
+            if (recv_len <= 0)
+                continue;
+
+            if (!udp_associate_connected)
+            {
+                if (!establish_udp_associate())
+                    continue;
+            }
+
+            uint16_t client_port = ntohs(from_addr.sin_port);
+            uint32_t dest_ip;
+            uint16_t dest_port;
+
+            if (!get_connection(client_port, &dest_ip, &dest_port))
+                continue;
+
+            // Build SOCKS5 UDP packet: +----+------+------+----------+----------+----------+
+            //                           |RSV | FRAG | ATYP | DST.ADDR | DST.PORT |   DATA   |
+            //                           +----+------+------+----------+----------+----------+
+            send_buf[0] = 0x00;  // RSV
+            send_buf[1] = 0x00;  // RSV
+            send_buf[2] = 0x00;  // FRAG
+            send_buf[3] = SOCKS5_ATYP_IPV4;
+            memcpy(send_buf + 4, &dest_ip, 4);
+            uint16_t port_net = htons(dest_port);
+            memcpy(send_buf + 8, &port_net, 2);
+            memcpy(send_buf + 10, recv_buf, recv_len);
+
+            sendto(socks5_udp_send_socket, send_buf, 10 + recv_len, 0,
+                   (struct sockaddr *)&socks5_udp_relay_addr, sizeof(socks5_udp_relay_addr));
+        }
+
+        // SOCKS5 proxy -> Client
+        if (udp_associate_connected && socks5_udp_send_socket >= 0 && FD_ISSET(socks5_udp_send_socket, &read_fds))
+        {
+            from_len = sizeof(from_addr);
+            ssize_t recv_len = recvfrom(socks5_udp_send_socket, recv_buf, sizeof(recv_buf), 0,
+                                        (struct sockaddr *)&from_addr, &from_len);
+            if (recv_len < 10)
+                continue;
+
+            // Parse SOCKS5 UDP packet
+            if (recv_buf[3] != SOCKS5_ATYP_IPV4)
+                continue;
+
+            uint32_t src_ip;
+            uint16_t src_port;
+            memcpy(&src_ip, recv_buf + 4, 4);
+            memcpy(&src_port, recv_buf + 8, 2);
+            src_port = ntohs(src_port);
+
+            // Find the client that sent a packet to this destination
+            // Iterate through hash table to find matching dest_ip:dest_port
+            pthread_mutex_lock(&lock);
+            
+            struct sockaddr_in client_addr;
+            bool found_client = false;
+            
+            for (int hash = 0; hash < CONNECTION_HASH_SIZE; hash++)
+            {
+                CONNECTION_INFO *conn = connection_hash_table[hash];
+                while (conn != NULL)
+                {
+                    if (conn->orig_dest_ip == src_ip &&
+                        conn->orig_dest_port == src_port)
+                    {
+                        // Found the connection - send response back to original client port
+                        memset(&client_addr, 0, sizeof(client_addr));
+                        client_addr.sin_family = AF_INET;
+                        client_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                        client_addr.sin_port = htons(conn->src_port);
+                        found_client = true;
+                        break;
+                    }
+                    conn = conn->next;
+                }
+                if (found_client)
+                    break;
+            }
+            
+            pthread_mutex_unlock(&lock);
+            
+            if (found_client)
+            {
+                // Send unwrapped UDP data back to client
+                ssize_t data_len = recv_len - 10;
+                sendto(udp_relay_socket, recv_buf + 10, data_len, 0,
+                       (struct sockaddr *)&client_addr, sizeof(client_addr));
+            }
+        }
+    }
+
+    if (socks5_udp_control_socket >= 0)
+        close(socks5_udp_control_socket);
+    if (socks5_udp_send_socket >= 0)
+        close(socks5_udp_send_socket);
+    if (udp_relay_socket >= 0)
+        close(udp_relay_socket);
+
+    return NULL;
+}
+
 // nfqueue packet callback
 static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfad, void *data)
 {
@@ -1127,17 +1504,17 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
                     char proxy_info[128];
                     if (action == RULE_ACTION_PROXY)
                     {
-                        snprintf(proxy_info, sizeof(proxy_info), "proxy %s://%s:%d",
+                        snprintf(proxy_info, sizeof(proxy_info), "proxy %s://%s:%d tcp",
                             g_proxy_type == PROXY_TYPE_HTTP ? "http" : "socks5",
                             g_proxy_host, g_proxy_port);
                     }
                     else if (action == RULE_ACTION_DIRECT)
                     {
-                        snprintf(proxy_info, sizeof(proxy_info), "direct");
+                        snprintf(proxy_info, sizeof(proxy_info), "direct tcp");
                     }
                     else if (action == RULE_ACTION_BLOCK)
                     {
-                        snprintf(proxy_info, sizeof(proxy_info), "blocked");
+                        snprintf(proxy_info, sizeof(proxy_info), "blocked tcp");
                     }
 
                     const char* display_name = extract_filename(process_name);
@@ -1191,15 +1568,37 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
 
         if (action == RULE_ACTION_PROXY && (dest_port == 67 || dest_port == 68))
             action = RULE_ACTION_DIRECT;
+        
+        // UDP proxy only works with SOCKS5, not HTTP
+        if (action == RULE_ACTION_PROXY && g_proxy_type != PROXY_TYPE_SOCKS5)
+            action = RULE_ACTION_DIRECT;
+        
+        // UDP proxy only works with SOCKS5, not HTTP
+        if (action == RULE_ACTION_PROXY && g_proxy_type != PROXY_TYPE_SOCKS5)
+            action = RULE_ACTION_DIRECT;
+        
+        // UDP proxy only works with SOCKS5, not HTTP
+        if (action == RULE_ACTION_PROXY && g_proxy_type != PROXY_TYPE_SOCKS5)
+            action = RULE_ACTION_DIRECT;
 
-        // log (skip our own process)
-        if (g_connection_callback != NULL && pid > 0 && pid != g_current_process_id)
+        // log (skip our own process, log even without PID for ephemeral UDP sockets)
+        if (g_connection_callback != NULL && pid != g_current_process_id)
         {
             char process_name[MAX_PROCESS_NAME];
-            if (get_process_name_from_pid(pid, process_name, sizeof(process_name)))
+            uint32_t log_pid = (pid == 0) ? 1 : pid;  // Use PID 1 for unknown processes
+            
+            if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
             {
-                if (!is_connection_already_logged(pid, dest_ip, dest_port, action))
-                {
+                // Got process name from PID
+            }
+            else
+            {
+                // UDP socket not found - ephemeral or timing issue
+                snprintf(process_name, sizeof(process_name), "unknown");
+            }
+            
+            if (!is_connection_already_logged(log_pid, dest_ip, dest_port, action))
+            {
                     char dest_ip_str[32];
                     format_ip_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
 
@@ -1219,14 +1618,13 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
                     }
 
                     const char* display_name = extract_filename(process_name);
-                    g_connection_callback(display_name, pid, dest_ip_str, dest_port, proxy_info);
+                    g_connection_callback(display_name, log_pid, dest_ip_str, dest_port, proxy_info);
 
                     if (g_traffic_logging_enabled)
                     {
-                        add_logged_connection(pid, dest_ip, dest_port, action);
+                        add_logged_connection(log_pid, dest_ip, dest_port, action);
                     }
                 }
-            }
         }
 
         if (action == RULE_ACTION_DIRECT)
@@ -1235,16 +1633,12 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
             return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
         else if (action == RULE_ACTION_PROXY)
         {
+            // UDP proxy via SOCKS5 UDP ASSOCIATE
             add_connection(src_port, src_ip, dest_ip, dest_port);
             
-            // add dynamic redirect rule for this source port
-            char cmd[256];
-            snprintf(cmd, sizeof(cmd), 
-                "iptables -t nat -A OUTPUT -p udp --sport %u -j REDIRECT --to-port %u 2>/dev/null",
-                src_port, LOCAL_UDP_RELAY_PORT);
-            system(cmd);
-            
-            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+            // Mark UDP packet for redirect to local UDP relay (port 34011)
+            uint32_t mark = 2;  // Use mark=2 for UDP (mark=1 is for TCP)
+            return nfq_set_verdict2(qh, id, NF_ACCEPT, mark, 0, NULL);
         }
     }
 
@@ -1872,6 +2266,15 @@ bool ProxyBridge_Start(void)
         return false;
     }
 
+    // Start UDP relay server if SOCKS5 proxy
+    if (g_proxy_type == PROXY_TYPE_SOCKS5)
+    {
+        if (pthread_create(&udp_relay_thread, NULL, udp_relay_server, NULL) != 0)
+        {
+            log_message("failed to create UDP relay thread");
+        }
+    }
+
     nfq_h = nfq_open();
     if (!nfq_h)
     {
@@ -1925,11 +2328,13 @@ bool ProxyBridge_Start(void)
     
     // setup nat redirect for marked packets
     int ret3 = system("iptables -t nat -A OUTPUT -p tcp -m mark --mark 1 -j REDIRECT --to-port 34010");
-    if (ret3 != 0) {
-        log_message("failed to add nat redirect rule");
+    int ret4 = system("iptables -t nat -A OUTPUT -p udp -m mark --mark 2 -j REDIRECT --to-port 34011");
+    if (ret3 != 0 || ret4 != 0) {
+        log_message("failed to add nat redirect rules");
     }
     
     (void)ret3;
+    (void)ret4;
 
     for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
@@ -1954,9 +2359,11 @@ bool ProxyBridge_Stop(void)
     int ret1 = system("iptables -t mangle -D OUTPUT -p tcp -j NFQUEUE --queue-num 0 2>/dev/null");
     int ret2 = system("iptables -t mangle -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null");
     int ret3 = system("iptables -t nat -D OUTPUT -p tcp -m mark --mark 1 -j REDIRECT --to-port 34010 2>/dev/null");
+    int ret4 = system("iptables -t nat -D OUTPUT -p udp -m mark --mark 2 -j REDIRECT --to-port 34011 2>/dev/null");
     (void)ret1;
     (void)ret2;
     (void)ret3;
+    (void)ret4;
 
     for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
@@ -1985,6 +2392,13 @@ bool ProxyBridge_Stop(void)
         pthread_cancel(proxy_thread);
         pthread_join(proxy_thread, NULL);
         proxy_thread = 0;
+    }
+
+    if (udp_relay_thread != 0)
+    {
+        pthread_cancel(udp_relay_thread);
+        pthread_join(udp_relay_thread, NULL);
+        udp_relay_thread = 0;
     }
 
     if (cleanup_thread != 0)
