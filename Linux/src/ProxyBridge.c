@@ -1,0 +1,2160 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <errno.h>
+#include <ctype.h>
+#include <dirent.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
+#include <arpa/inet.h>
+#include <linux/netfilter.h>
+#include <libnetfilter_queue/libnetfilter_queue.h>
+#include <linux/netlink.h>
+#include <linux/sock_diag.h>
+#include <linux/inet_diag.h>
+#include <netdb.h>
+#include "ProxyBridge.h"
+
+#define LOCAL_PROXY_PORT 34010
+#define LOCAL_UDP_RELAY_PORT 34011
+#define MAX_PROCESS_NAME 256
+#define PID_CACHE_SIZE 1024
+#define PID_CACHE_TTL_MS 1000
+#define NUM_PACKET_THREADS 4
+#define CONNECTION_HASH_SIZE 256
+#define SOCKS5_BUFFER_SIZE 1024
+#define HTTP_BUFFER_SIZE 1024
+#define LOG_BUFFER_SIZE 1024
+
+typedef struct PROCESS_RULE {
+    uint32_t rule_id;
+    char process_name[MAX_PROCESS_NAME];
+    char *target_hosts;
+    char *target_ports;
+    RuleProtocol protocol;
+    RuleAction action;
+    bool enabled;
+    struct PROCESS_RULE *next;
+} PROCESS_RULE;
+
+#define SOCKS5_VERSION 0x05
+#define SOCKS5_CMD_CONNECT 0x01
+#define SOCKS5_CMD_UDP_ASSOCIATE 0x03
+#define SOCKS5_ATYP_IPV4 0x01
+#define SOCKS5_AUTH_NONE 0x00
+
+typedef struct CONNECTION_INFO {
+    uint16_t src_port;
+    uint32_t src_ip;
+    uint32_t orig_dest_ip;
+    uint16_t orig_dest_port;
+    bool is_tracked;
+    uint64_t last_activity;
+    struct CONNECTION_INFO *next;
+} CONNECTION_INFO;
+
+typedef struct {
+    int client_socket;
+    uint32_t orig_dest_ip;
+    uint16_t orig_dest_port;
+} CONNECTION_CONFIG;
+
+typedef struct {
+    int from_socket;
+    int to_socket;
+} TRANSFER_CONFIG;
+
+typedef struct LOGGED_CONNECTION {
+    uint32_t pid;
+    uint32_t dest_ip;
+    uint16_t dest_port;
+    RuleAction action;
+    struct LOGGED_CONNECTION *next;
+} LOGGED_CONNECTION;
+
+typedef struct PID_CACHE_ENTRY {
+    uint32_t src_ip;
+    uint16_t src_port;
+    uint32_t pid;
+    uint64_t timestamp;
+    bool is_udp;
+    struct PID_CACHE_ENTRY *next;
+} PID_CACHE_ENTRY;
+
+static CONNECTION_INFO *connection_hash_table[CONNECTION_HASH_SIZE] = {NULL};
+static LOGGED_CONNECTION *logged_connections = NULL;
+static PROCESS_RULE *rules_list = NULL;
+static uint32_t g_next_rule_id = 1;
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static struct nfq_handle *nfq_h = NULL;
+static struct nfq_q_handle *nfq_qh = NULL;
+static pthread_t packet_thread[NUM_PACKET_THREADS] = {0};
+static pthread_t proxy_thread = 0;
+static pthread_t cleanup_thread = 0;
+static PID_CACHE_ENTRY *pid_cache[PID_CACHE_SIZE] = {NULL};
+static bool g_has_active_rules = false;
+static bool running = false;
+static uint32_t g_current_process_id = 0;
+
+static bool g_traffic_logging_enabled = true;
+
+static char g_proxy_host[256] = "";
+static uint16_t g_proxy_port = 0;
+static uint16_t g_local_relay_port = LOCAL_PROXY_PORT;
+static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
+static char g_proxy_username[256] = "";
+static char g_proxy_password[256] = "";
+static bool g_dns_via_proxy = true;
+static LogCallback g_log_callback = NULL;
+static ConnectionCallback g_connection_callback = NULL;
+
+static void log_message(const char *msg, ...)
+{
+    if (g_log_callback == NULL) return;
+    char buffer[LOG_BUFFER_SIZE];
+    va_list args;
+    va_start(args, msg);
+    vsnprintf(buffer, sizeof(buffer), msg, args);
+    va_end(args);
+    g_log_callback(buffer);
+}
+
+static const char* extract_filename(const char* path)
+{
+    if (!path) return "";
+    const char* last_slash = strrchr(path, '/');
+    return last_slash ? (last_slash + 1) : path;
+}
+
+static inline char* skip_whitespace(char *str)
+{
+    while (*str == ' ' || *str == '\t')
+        str++;
+    return str;
+}
+
+static void format_ip_address(uint32_t ip, char *buffer, size_t size)
+{
+    snprintf(buffer, size, "%d.%d.%d.%d",
+        (ip >> 0) & 0xFF, (ip >> 8) & 0xFF,
+        (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+}
+
+typedef bool (*token_match_func)(const char *token, const void *data);
+
+static bool parse_token_list(const char *list, const char *delimiters, token_match_func match_func, const void *match_data)
+{
+    if (list == NULL || list[0] == '\0' || strcmp(list, "*") == 0)
+        return true;
+
+    size_t len = strlen(list) + 1;
+    char *list_copy = malloc(len);
+    if (list_copy == NULL)
+        return false;
+
+    strncpy(list_copy, list, len - 1);
+    list_copy[len - 1] = '\0';
+    bool matched = false;
+    char *saveptr = NULL;
+    char *token = strtok_r(list_copy, delimiters, &saveptr);
+    while (token != NULL)
+    {
+        token = skip_whitespace(token);
+        if (match_func(token, match_data))
+        {
+            matched = true;
+            break;
+        }
+        token = strtok_r(NULL, delimiters, &saveptr);
+    }
+    free(list_copy);
+    return matched;
+}
+
+static void configure_tcp_socket(int sock, int bufsize, int timeout_ms)
+{
+    int nodelay = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    struct timeval timeout = {timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+}
+
+static void configure_udp_socket(int sock, int bufsize, int timeout_ms)
+{
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    struct timeval timeout = {timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+}
+
+static ssize_t send_all(int sock, const char *buf, size_t len)
+{
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(sock, buf + sent, len - sent, 0);
+        if (n < 0) return -1;
+        sent += n;
+    }
+    return sent;
+}
+
+static uint64_t get_monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static uint32_t parse_ipv4(const char *ip);
+static uint32_t resolve_hostname(const char *hostname);
+static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port);
+static bool match_ip_pattern(const char *pattern, uint32_t ip);
+static bool match_port_pattern(const char *pattern, uint16_t port);
+static bool match_ip_list(const char *ip_list, uint32_t ip);
+static bool match_port_list(const char *port_list, uint16_t port);
+static bool match_process_pattern(const char *pattern, const char *process_name);
+static bool match_process_list(const char *process_list, const char *process_name);
+static int http_connect(int s, uint32_t dest_ip, uint16_t dest_port);
+static void* local_proxy_server(void *arg);
+static void* connection_handler(void *arg);
+static void* transfer_handler(void *arg);
+static void* packet_processor(void *arg);
+static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_port, bool is_udp);
+static bool get_process_name_from_pid(uint32_t pid, char *name, size_t name_size);
+static RuleAction match_rule(const char *process_name, uint32_t dest_ip, uint16_t dest_port, bool is_udp);
+static RuleAction check_process_rule(uint32_t src_ip, uint16_t src_port, uint32_t dest_ip, uint16_t dest_port, bool is_udp, uint32_t *out_pid);
+static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip, uint16_t dest_port);
+static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_port);
+static bool is_connection_tracked(uint16_t src_port);
+static void remove_connection(uint16_t src_port);
+static void cleanup_stale_connections(void);
+static bool is_connection_already_logged(uint32_t pid, uint32_t dest_ip, uint16_t dest_port, RuleAction action);
+static void add_logged_connection(uint32_t pid, uint32_t dest_ip, uint16_t dest_port, RuleAction action);
+static void clear_logged_connections(void);
+static bool is_broadcast_or_multicast(uint32_t ip);
+static uint32_t get_cached_pid(uint32_t src_ip, uint16_t src_port, bool is_udp);
+static void cache_pid(uint32_t src_ip, uint16_t src_port, uint32_t pid, bool is_udp);
+static void clear_pid_cache(void);
+static void update_has_active_rules(void);
+
+// fast pid lookup using netlink sock_diag
+static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_port, bool is_udp)
+{
+    uint32_t cached_pid = get_cached_pid(src_ip, src_port, is_udp);
+    if (cached_pid != 0)
+        return cached_pid;
+
+    int fd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_SOCK_DIAG);
+    if (fd < 0) {
+        return 0;
+    }
+
+    struct {
+        struct nlmsghdr nlh;
+        struct inet_diag_req_v2 r;
+    } req;
+
+    memset(&req, 0, sizeof(req));
+    req.nlh.nlmsg_len = sizeof(req);
+    req.nlh.nlmsg_type = SOCK_DIAG_BY_FAMILY;
+    req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.r.sdiag_family = AF_INET;
+    req.r.sdiag_protocol = is_udp ? IPPROTO_UDP : IPPROTO_TCP;
+    req.r.idiag_states = is_udp ? (1 << TCP_ESTABLISHED) : -1;
+    req.r.idiag_ext = 0;
+
+    struct sockaddr_nl sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+
+    if (sendto(fd, &req, sizeof(req), 0, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        close(fd);
+        return 0;
+    }
+
+    uint32_t pid = 0;
+    unsigned long target_inode = 0;
+    int matches_found = 0;
+    char buf[8192];
+    struct iovec iov = {buf, sizeof(buf)};
+    struct msghdr msg = {&sa, sizeof(sa), &iov, 1, NULL, 0, 0};
+
+    while (1) {
+        ssize_t len = recvmsg(fd, &msg, 0);
+        if (len < 0) {
+            break;
+        }
+        if (len == 0) break;
+
+        struct nlmsghdr *h = (struct nlmsghdr *)buf;
+        while (NLMSG_OK(h, len)) {
+            if (h->nlmsg_type == NLMSG_DONE) {
+                goto done;
+            }
+            if (h->nlmsg_type == NLMSG_ERROR) {
+                goto done;
+            }
+            if (h->nlmsg_type == SOCK_DIAG_BY_FAMILY) {
+                struct inet_diag_msg *r = NLMSG_DATA(h);
+                
+                // match src ip and port
+                if (r->id.idiag_src[0] == src_ip && ntohs(r->id.idiag_sport) == src_port) {
+                    matches_found++;
+                    target_inode = r->idiag_inode;
+                    
+                    // read /proc/net/{tcp,udp} to map inode to pid
+                    char proc_file[64];
+                    snprintf(proc_file, sizeof(proc_file), "/proc/net/%s", is_udp ? "udp" : "tcp");
+                    FILE *fp = fopen(proc_file, "r");
+                    if (fp) {
+                        char line[512];
+                        (void)fgets(line, sizeof(line), fp); // skip header
+                        while (fgets(line, sizeof(line), fp)) {
+                            unsigned long inode;
+                            int uid_val, pid_val;
+                            if (sscanf(line, "%*d: %*X:%*X %*X:%*X %*X %*X:%*X %*X:%*X %*X %d %*d %lu",
+                                      &uid_val, &inode) == 2) {
+                                if (inode == target_inode) {
+                                    // now find PID from /proc/*/fd/* with this inode
+                                    // this is expensive but necessary
+                                    DIR *proc_dir = opendir("/proc");
+                                    if (proc_dir) {
+                                        struct dirent *proc_entry;
+                                        while ((proc_entry = readdir(proc_dir)) != NULL) {
+                                            if (!isdigit(proc_entry->d_name[0])) continue;
+                                            
+                                            char fd_path[256];
+                                            snprintf(fd_path, sizeof(fd_path), "/proc/%s/fd", proc_entry->d_name);
+                                            DIR *fd_dir = opendir(fd_path);
+                                            if (fd_dir) {
+                                                struct dirent *fd_entry;
+                                                while ((fd_entry = readdir(fd_dir)) != NULL) {
+                                                    if (fd_entry->d_name[0] == '.') continue;
+                                                    
+                                                    char link_path[512], link_target[512];
+                                                    snprintf(link_path, sizeof(link_path), "/proc/%s/fd/%s",
+                                                            proc_entry->d_name, fd_entry->d_name);
+                                                    ssize_t link_len = readlink(link_path, link_target, sizeof(link_target)-1);
+                                                    if (link_len > 0) {
+                                                        link_target[link_len] = '\0';
+                                                        char expected[64];
+                                                        snprintf(expected, sizeof(expected), "socket:[%lu]", target_inode);
+                                                        if (strcmp(link_target, expected) == 0) {
+                                                            pid = atoi(proc_entry->d_name);
+                                                            closedir(fd_dir);
+                                                            closedir(proc_dir);
+                                                            fclose(fp);
+                                                            goto done;
+                                                        }
+                                                    }
+                                                }
+                                                closedir(fd_dir);
+                                            }
+                                        }
+                                        closedir(proc_dir);
+                                    }
+                                    fclose(fp);
+                                    goto done;
+                                }
+                            }
+                        }
+                        fclose(fp);
+                    }
+                    goto done;
+                }
+            }
+            h = NLMSG_NEXT(h, len);
+        }
+    }
+
+done:
+    close(fd);
+    if (pid != 0)
+        cache_pid(src_ip, src_port, pid, is_udp);
+    return pid;
+}
+
+static bool get_process_name_from_pid(uint32_t pid, char *name, size_t name_size)
+{
+    if (pid == 0)
+        return false;
+
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%u/exe", pid);
+    
+    ssize_t len = readlink(path, name, name_size - 1);
+    if (len < 0)
+        return false;
+    
+    name[len] = '\0';
+    return true;
+}
+
+static bool match_ip_pattern(const char *pattern, uint32_t ip)
+{
+    if (pattern == NULL || strcmp(pattern, "*") == 0)
+        return true;
+
+    unsigned char ip_octets[4];
+    ip_octets[0] = (ip >> 0) & 0xFF;
+    ip_octets[1] = (ip >> 8) & 0xFF;
+    ip_octets[2] = (ip >> 16) & 0xFF;
+    ip_octets[3] = (ip >> 24) & 0xFF;
+
+    char pattern_copy[256];
+    strncpy(pattern_copy, pattern, sizeof(pattern_copy) - 1);
+    pattern_copy[sizeof(pattern_copy) - 1] = '\0';
+
+    char pattern_octets[4][16];
+    int octet_count = 0;
+    int char_idx = 0;
+
+    for (size_t i = 0; i <= strlen(pattern_copy) && octet_count < 4; i++)
+    {
+        if (pattern_copy[i] == '.' || pattern_copy[i] == '\0')
+        {
+            pattern_octets[octet_count][char_idx] = '\0';
+            octet_count++;
+            char_idx = 0;
+            if (pattern_copy[i] == '\0')
+                break;
+        }
+        else
+        {
+            if (char_idx < 15)
+                pattern_octets[octet_count][char_idx++] = pattern_copy[i];
+        }
+    }
+
+    if (octet_count != 4)
+        return false;
+
+    for (int i = 0; i < 4; i++)
+    {
+        if (strcmp(pattern_octets[i], "*") == 0)
+            continue;
+        int pattern_val = atoi(pattern_octets[i]);
+        if (pattern_val != ip_octets[i])
+            return false;
+    }
+    return true;
+}
+
+static bool match_port_pattern(const char *pattern, uint16_t port)
+{
+    if (pattern == NULL || strcmp(pattern, "*") == 0)
+        return true;
+
+    char *dash = strchr(pattern, '-');
+    if (dash != NULL)
+    {
+        int start_port = atoi(pattern);
+        int end_port = atoi(dash + 1);
+        return (port >= start_port && port <= end_port);
+    }
+
+    return (port == atoi(pattern));
+}
+
+static bool ip_match_wrapper(const char *token, const void *data)
+{
+    return match_ip_pattern(token, *(const uint32_t*)data);
+}
+
+static bool match_ip_list(const char *ip_list, uint32_t ip)
+{
+    return parse_token_list(ip_list, ";", ip_match_wrapper, &ip);
+}
+
+static bool port_match_wrapper(const char *token, const void *data)
+{
+    return match_port_pattern(token, *(const uint16_t*)data);
+}
+
+static bool match_port_list(const char *port_list, uint16_t port)
+{
+    return parse_token_list(port_list, ",;", port_match_wrapper, &port);
+}
+
+static bool match_process_pattern(const char *pattern, const char *process_full_path)
+{
+    if (pattern == NULL || strcmp(pattern, "*") == 0)
+        return true;
+
+    const char *filename = strrchr(process_full_path, '/');
+    if (filename != NULL)
+        filename++;
+    else
+        filename = process_full_path;
+
+    size_t pattern_len = strlen(pattern);
+    size_t name_len = strlen(filename);
+    size_t full_path_len = strlen(process_full_path);
+
+    bool is_full_path_pattern = (strchr(pattern, '/') != NULL);
+    const char *match_target = is_full_path_pattern ? process_full_path : filename;
+    size_t target_len = is_full_path_pattern ? full_path_len : name_len;
+
+    if (pattern_len > 0 && pattern[pattern_len - 1] == '*')
+    {
+        return strncasecmp(pattern, match_target, pattern_len - 1) == 0;
+    }
+
+    if (pattern_len > 1 && pattern[0] == '*')
+    {
+        const char *pattern_suffix = pattern + 1;
+        size_t suffix_len = pattern_len - 1;
+        if (target_len >= suffix_len)
+        {
+            return strcasecmp(match_target + target_len - suffix_len, pattern_suffix) == 0;
+        }
+        return false;
+    }
+
+    return strcasecmp(pattern, match_target) == 0;
+}
+
+typedef struct {
+    const char *process_name;
+} process_match_data;
+
+static bool process_match_wrapper(const char *token, const void *data)
+{
+    const process_match_data *pdata = data;
+    return match_process_pattern(token, pdata->process_name);
+}
+
+static bool match_process_list(const char *process_list, const char *process_name)
+{
+    process_match_data data = {process_name};
+    return parse_token_list(process_list, ";", process_match_wrapper, &data);
+}
+
+static uint32_t parse_ipv4(const char *ip)
+{
+    unsigned int a, b, c, d;
+    if (sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+        return 0;
+    if (a > 255 || b > 255 || c > 255 || d > 255)
+        return 0;
+    return (a << 0) | (b << 8) | (c << 16) | (d << 24);
+}
+
+static uint32_t resolve_hostname(const char *hostname)
+{
+    if (hostname == NULL || hostname[0] == '\0')
+        return 0;
+
+    uint32_t ip = parse_ipv4(hostname);
+    if (ip != 0)
+        return ip;
+
+    struct addrinfo hints, *result = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (getaddrinfo(hostname, NULL, &hints, &result) != 0)
+    {
+        log_message("failed to resolve hostname: %s", hostname);
+        return 0;
+    }
+
+    if (result == NULL || result->ai_family != AF_INET)
+    {
+        if (result != NULL)
+            freeaddrinfo(result);
+        log_message("no ipv4 address found for hostname: %s", hostname);
+        return 0;
+    }
+
+    struct sockaddr_in *addr = (struct sockaddr_in *)result->ai_addr;
+    uint32_t resolved_ip = addr->sin_addr.s_addr;
+    freeaddrinfo(result);
+
+    log_message("resolved %s to %d.%d.%d.%d", hostname,
+        (resolved_ip >> 0) & 0xFF, (resolved_ip >> 8) & 0xFF,
+        (resolved_ip >> 16) & 0xFF, (resolved_ip >> 24) & 0xFF);
+
+    return resolved_ip;
+}
+
+static bool is_broadcast_or_multicast(uint32_t ip)
+{
+    uint8_t first_octet = (ip >> 0) & 0xFF;
+    
+    if (ip == 0xFFFFFFFF)
+        return true;
+    
+    if (first_octet >= 224 && first_octet <= 239)
+        return true;
+
+    return false;
+}
+
+static RuleAction match_rule(const char *process_name, uint32_t dest_ip, uint16_t dest_port, bool is_udp)
+{
+    PROCESS_RULE *rule = rules_list;
+    PROCESS_RULE *wildcard_rule = NULL;
+
+    while (rule != NULL)
+    {
+        if (!rule->enabled)
+        {
+            rule = rule->next;
+            continue;
+        }
+
+        if (rule->protocol != RULE_PROTOCOL_BOTH)
+        {
+            if (rule->protocol == RULE_PROTOCOL_TCP && is_udp)
+            {
+                rule = rule->next;
+                continue;
+            }
+            if (rule->protocol == RULE_PROTOCOL_UDP && !is_udp)
+            {
+                rule = rule->next;
+                continue;
+            }
+        }
+
+        bool is_wildcard_process = (strcmp(rule->process_name, "*") == 0 || strcasecmp(rule->process_name, "ANY") == 0);
+
+        if (is_wildcard_process)
+        {
+            bool has_ip_filter = (strcmp(rule->target_hosts, "*") != 0);
+            bool has_port_filter = (strcmp(rule->target_ports, "*") != 0);
+
+            if (has_ip_filter || has_port_filter)
+            {
+                if (match_ip_list(rule->target_hosts, dest_ip) &&
+                    match_port_list(rule->target_ports, dest_port))
+                {
+                    return rule->action;
+                }
+                rule = rule->next;
+                continue;
+            }
+
+            if (wildcard_rule == NULL)
+            {
+                wildcard_rule = rule;
+            }
+            rule = rule->next;
+            continue;
+        }
+
+        if (match_process_list(rule->process_name, process_name))
+        {
+            if (match_ip_list(rule->target_hosts, dest_ip) &&
+                match_port_list(rule->target_ports, dest_port))
+            {
+                return rule->action;
+            }
+        }
+
+        rule = rule->next;
+    }
+
+    if (wildcard_rule != NULL)
+    {
+        return wildcard_rule->action;
+    }
+
+    return RULE_ACTION_DIRECT;
+}
+
+static RuleAction check_process_rule(uint32_t src_ip, uint16_t src_port, uint32_t dest_ip, uint16_t dest_port, bool is_udp, uint32_t *out_pid)
+{
+    uint32_t pid;
+    char process_name[MAX_PROCESS_NAME];
+
+    pid = get_process_id_from_connection(src_ip, src_port, is_udp);
+
+    if (out_pid != NULL)
+        *out_pid = pid;
+
+    if (pid == 0)
+        return RULE_ACTION_DIRECT;
+
+    if (pid == g_current_process_id)
+        return RULE_ACTION_DIRECT;
+
+    if (!get_process_name_from_pid(pid, process_name, sizeof(process_name)))
+        return RULE_ACTION_DIRECT;
+
+    RuleAction action = match_rule(process_name, dest_ip, dest_port, is_udp);
+
+    if (action == RULE_ACTION_PROXY && is_udp && g_proxy_type == PROXY_TYPE_HTTP)
+    {
+        return RULE_ACTION_DIRECT;
+    }
+    if (action == RULE_ACTION_PROXY && (g_proxy_host[0] == '\0' || g_proxy_port == 0))
+    {
+        return RULE_ACTION_DIRECT;
+    }
+
+    return action;
+}
+
+static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
+{
+    unsigned char buf[SOCKS5_BUFFER_SIZE];
+    ssize_t len;
+    bool use_auth = (g_proxy_username[0] != '\0');
+
+    buf[0] = SOCKS5_VERSION;
+    if (use_auth)
+    {
+        buf[1] = 0x02;
+        buf[2] = SOCKS5_AUTH_NONE;
+        buf[3] = 0x02;
+        if (send(s, buf, 4, 0) != 4)
+        {
+            log_message("socks5 failed to send auth methods");
+            return -1;
+        }
+    }
+    else
+    {
+        buf[1] = 0x01;
+        buf[2] = SOCKS5_AUTH_NONE;
+        if (send(s, buf, 3, 0) != 3)
+        {
+            log_message("socks5 failed to send auth methods");
+            return -1;
+        }
+    }
+
+    len = recv(s, buf, 2, 0);
+    if (len != 2 || buf[0] != SOCKS5_VERSION)
+    {
+        log_message("socks5 invalid auth response");
+        return -1;
+    }
+
+    if (buf[1] == 0x02 && use_auth)
+    {
+        size_t ulen = strlen(g_proxy_username);
+        size_t plen = strlen(g_proxy_password);
+        buf[0] = 0x01;
+        buf[1] = (unsigned char)ulen;
+        memcpy(buf + 2, g_proxy_username, ulen);
+        buf[2 + ulen] = (unsigned char)plen;
+        memcpy(buf + 3 + ulen, g_proxy_password, plen);
+        
+        if (send(s, buf, 3 + ulen + plen, 0) != (ssize_t)(3 + ulen + plen))
+        {
+            log_message("socks5 failed to send credentials");
+            return -1;
+        }
+
+        len = recv(s, buf, 2, 0);
+        if (len != 2 || buf[0] != 0x01 || buf[1] != 0x00)
+        {
+            log_message("socks5 authentication failed");
+            return -1;
+        }
+    }
+    else if (buf[1] != SOCKS5_AUTH_NONE)
+    {
+        log_message("socks5 unsupported auth method");
+        return -1;
+    }
+
+    buf[0] = SOCKS5_VERSION;
+    buf[1] = SOCKS5_CMD_CONNECT;
+    buf[2] = 0x00;
+    buf[3] = SOCKS5_ATYP_IPV4;
+    memcpy(buf + 4, &dest_ip, 4);
+    uint16_t port_net = htons(dest_port);
+    memcpy(buf + 8, &port_net, 2);
+
+    if (send(s, buf, 10, 0) != 10)
+    {
+        log_message("socks5 failed to send connect request");
+        return -1;
+    }
+
+    len = recv(s, buf, 10, 0);
+    if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+    {
+        log_message("socks5 connect failed status %d", len > 1 ? buf[1] : -1);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int http_connect(int s, uint32_t dest_ip, uint16_t dest_port)
+{
+    char buf[HTTP_BUFFER_SIZE];
+    char dest_ip_str[32];
+    format_ip_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
+
+    int len = snprintf(buf, sizeof(buf),
+        "CONNECT %s:%d HTTP/1.1\r\n"
+        "Host: %s:%d\r\n"
+        "Proxy-Connection: Keep-Alive\r\n",
+        dest_ip_str, dest_port, dest_ip_str, dest_port);
+
+    if (g_proxy_username[0] != '\0')
+    {
+        char auth[512];
+        snprintf(auth, sizeof(auth), "%s:%s", g_proxy_username, g_proxy_password);
+        
+        // simple base64 encode - production code should use proper base64
+        len += snprintf(buf + len, sizeof(buf) - len,
+            "Proxy-Authorization: Basic %s\r\n", auth);
+    }
+
+    len += snprintf(buf + len, sizeof(buf) - len, "\r\n");
+
+    if (send_all(s, buf, len) < 0)
+    {
+        log_message("http failed to send connect");
+        return -1;
+    }
+
+    ssize_t recv_len = recv(s, buf, sizeof(buf) - 1, 0);
+    if (recv_len < 12)
+    {
+        log_message("http invalid response");
+        return -1;
+    }
+
+    buf[recv_len] = '\0';
+    if (strncmp(buf, "HTTP/1.", 7) != 0)
+    {
+        log_message("http invalid response");
+        return -1;
+    }
+
+    int status_code = 0;
+    if (sscanf(buf + 9, "%d", &status_code) != 1 || status_code != 200)
+    {
+        log_message("http connect failed status %d", status_code);
+        return -1;
+    }
+
+    return 0;
+}
+
+static void* transfer_handler(void *arg)
+{
+    TRANSFER_CONFIG *config = arg;
+    char buffer[65536];
+    ssize_t n;
+
+    while ((n = recv(config->from_socket, buffer, sizeof(buffer), 0)) > 0)
+    {
+        if (send_all(config->to_socket, buffer, n) < 0)
+            break;
+    }
+
+    shutdown(config->from_socket, SHUT_RD);
+    shutdown(config->to_socket, SHUT_WR);
+    free(config);
+    return NULL;
+}
+
+static void* connection_handler(void *arg)
+{
+    CONNECTION_CONFIG *config = arg;
+    int client_sock = config->client_socket;
+    uint32_t dest_ip = config->orig_dest_ip;
+    uint16_t dest_port = config->orig_dest_port;
+    int socks_sock;
+    struct sockaddr_in socks_addr;
+    uint32_t socks5_ip;
+
+    free(config);
+
+    socks5_ip = resolve_hostname(g_proxy_host);
+    if (socks5_ip == 0)
+    {
+        close(client_sock);
+        return NULL;
+    }
+
+    socks_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (socks_sock < 0)
+    {
+        log_message("socket creation failed %d", errno);
+        close(client_sock);
+        return NULL;
+    }
+
+    configure_tcp_socket(socks_sock, 524288, 30000);
+    configure_tcp_socket(client_sock, 524288, 30000);
+
+    memset(&socks_addr, 0, sizeof(socks_addr));
+    socks_addr.sin_family = AF_INET;
+    socks_addr.sin_addr.s_addr = socks5_ip;
+    socks_addr.sin_port = htons(g_proxy_port);
+
+    if (connect(socks_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) < 0)
+    {
+        log_message("failed to connect to proxy %d", errno);
+        close(client_sock);
+        close(socks_sock);
+        return NULL;
+    }
+
+    if (g_proxy_type == PROXY_TYPE_SOCKS5)
+    {
+        if (socks5_connect(socks_sock, dest_ip, dest_port) != 0)
+        {
+            close(client_sock);
+            close(socks_sock);
+            return NULL;
+        }
+    }
+    else if (g_proxy_type == PROXY_TYPE_HTTP)
+    {
+        if (http_connect(socks_sock, dest_ip, dest_port) != 0)
+        {
+            close(client_sock);
+            close(socks_sock);
+            return NULL;
+        }
+    }
+
+    TRANSFER_CONFIG *client_to_socks = malloc(sizeof(TRANSFER_CONFIG));
+    TRANSFER_CONFIG *socks_to_client = malloc(sizeof(TRANSFER_CONFIG));
+
+    if (!client_to_socks || !socks_to_client)
+    {
+        close(client_sock);
+        close(socks_sock);
+        free(client_to_socks);
+        free(socks_to_client);
+        return NULL;
+    }
+
+    client_to_socks->from_socket = client_sock;
+    client_to_socks->to_socket = socks_sock;
+    socks_to_client->from_socket = socks_sock;
+    socks_to_client->to_socket = client_sock;
+
+    pthread_t transfer_thread;
+    pthread_create(&transfer_thread, NULL, transfer_handler, client_to_socks);
+    pthread_detach(transfer_thread);
+
+    transfer_handler(socks_to_client);
+
+    close(client_sock);
+    close(socks_sock);
+    return NULL;
+}
+
+static void* local_proxy_server(void *arg)
+{
+    (void)arg;
+    struct sockaddr_in addr;
+    int listen_sock;
+    int on = 1;
+
+    listen_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_sock < 0)
+    {
+        log_message("socket creation failed %d", errno);
+        return NULL;
+    }
+
+    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+
+    int nodelay = 1;
+    setsockopt(listen_sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(g_local_relay_port);
+
+    if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+    {
+        log_message("bind failed %d", errno);
+        close(listen_sock);
+        return NULL;
+    }
+
+    if (listen(listen_sock, SOMAXCONN) < 0)
+    {
+        log_message("listen failed %d", errno);
+        close(listen_sock);
+        return NULL;
+    }
+
+    log_message("local proxy listening on port %d", g_local_relay_port);
+
+    while (running)
+    {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(listen_sock, &read_fds);
+        struct timeval timeout = {1, 0};
+
+        if (select(listen_sock + 1, &read_fds, NULL, NULL, &timeout) <= 0)
+            continue;
+
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        int client_sock = accept(listen_sock, (struct sockaddr *)&client_addr, &addr_len);
+
+        if (client_sock < 0)
+            continue;
+
+        log_message("[RELAY] accepted connection from %s:%u", 
+            inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+
+        CONNECTION_CONFIG *conn_config = malloc(sizeof(CONNECTION_CONFIG));
+        if (conn_config == NULL)
+        {
+            close(client_sock);
+            continue;
+        }
+
+        conn_config->client_socket = client_sock;
+
+        uint16_t client_port = ntohs(client_addr.sin_port);
+        if (!get_connection(client_port, &conn_config->orig_dest_ip, &conn_config->orig_dest_port))
+        {
+            log_message("[RELAY] no connection tracking for port %u", client_port);
+            close(client_sock);
+            free(conn_config);
+            continue;
+        }
+        
+        char dest_str[32];
+        format_ip_address(conn_config->orig_dest_ip, dest_str, sizeof(dest_str));
+        log_message("[RELAY] forwarding to %s:%u via proxy", dest_str, conn_config->orig_dest_port);
+
+        pthread_t conn_thread;
+        if (pthread_create(&conn_thread, NULL, connection_handler, conn_config) != 0)
+        {
+            log_message("pthread_create failed %d", errno);
+            close(client_sock);
+            free(conn_config);
+            continue;
+        }
+        pthread_detach(conn_thread);
+    }
+
+    close(listen_sock);
+    return NULL;
+}
+
+// nfqueue packet callback
+static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfad, void *data)
+{
+    (void)nfmsg;
+    (void)data;
+    
+    struct nfqnl_msg_packet_hdr *ph = nfq_get_msg_packet_hdr(nfad);
+    if (!ph) return nfq_set_verdict(qh, 0, NF_ACCEPT, 0, NULL);
+
+    uint32_t id = ntohl(ph->packet_id);
+    
+    unsigned char *payload;
+    int payload_len = nfq_get_payload(nfad, &payload);
+    if (payload_len < (int)sizeof(struct iphdr))
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+
+    struct iphdr *iph = (struct iphdr *)payload;
+    
+    // fast path - no rules configured
+    if (!g_has_active_rules && g_connection_callback == NULL)
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+
+    uint32_t src_ip = iph->saddr;
+    uint32_t dest_ip = iph->daddr;
+    uint16_t src_port = 0;
+    uint16_t dest_port = 0;
+    RuleAction action = RULE_ACTION_DIRECT;
+    uint32_t pid = 0;
+
+    if (iph->protocol == IPPROTO_TCP)
+    {
+        if (payload_len < (int)(iph->ihl * 4 + sizeof(struct tcphdr)))
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+
+        struct tcphdr *tcph = (struct tcphdr *)(payload + iph->ihl * 4);
+        src_port = ntohs(tcph->source);
+        dest_port = ntohs(tcph->dest);
+
+        // skip packets from local relay
+        if (src_port == g_local_relay_port)
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+
+        if (is_connection_tracked(src_port))
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+
+        // only process SYN packets for new connections
+        if (!(tcph->syn && !tcph->ack))
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+
+        if (dest_port == 53 && !g_dns_via_proxy)
+            action = RULE_ACTION_DIRECT;
+        else
+            action = check_process_rule(src_ip, src_port, dest_ip, dest_port, false, &pid);
+
+        if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(dest_ip))
+            action = RULE_ACTION_DIRECT;
+
+        // log connection (skip our own process)
+        if (g_connection_callback != NULL && (tcph->syn && !tcph->ack) && pid > 0 && pid != g_current_process_id)
+        {
+            char process_name[MAX_PROCESS_NAME];
+            if (get_process_name_from_pid(pid, process_name, sizeof(process_name)))
+            {
+                if (!is_connection_already_logged(pid, dest_ip, dest_port, action))
+                {
+                    char dest_ip_str[32];
+                    format_ip_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
+
+                    char proxy_info[128];
+                    if (action == RULE_ACTION_PROXY)
+                    {
+                        snprintf(proxy_info, sizeof(proxy_info), "proxy %s://%s:%d",
+                            g_proxy_type == PROXY_TYPE_HTTP ? "http" : "socks5",
+                            g_proxy_host, g_proxy_port);
+                    }
+                    else if (action == RULE_ACTION_DIRECT)
+                    {
+                        snprintf(proxy_info, sizeof(proxy_info), "direct");
+                    }
+                    else if (action == RULE_ACTION_BLOCK)
+                    {
+                        snprintf(proxy_info, sizeof(proxy_info), "blocked");
+                    }
+
+                    const char* display_name = extract_filename(process_name);
+                    g_connection_callback(display_name, pid, dest_ip_str, dest_port, proxy_info);
+
+                    if (g_traffic_logging_enabled)
+                    {
+                        add_logged_connection(pid, dest_ip, dest_port, action);
+                    }
+                }
+            }
+        }
+
+        if (action == RULE_ACTION_DIRECT)
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+        else if (action == RULE_ACTION_BLOCK)
+            return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
+        else if (action == RULE_ACTION_PROXY)
+        {
+            // store connection info
+            add_connection(src_port, src_ip, dest_ip, dest_port);
+            
+            // mark packet so nat table REDIRECT rule will catch it
+            log_message("[REDIRECT] marking packet sport %u for redirect", src_port);
+            uint32_t mark = 1;
+            return nfq_set_verdict2(qh, id, NF_ACCEPT, mark, 0, NULL);
+        }
+    }
+    else if (iph->protocol == IPPROTO_UDP)
+    {
+        if (payload_len < (int)(iph->ihl * 4 + sizeof(struct udphdr)))
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+
+        struct udphdr *udph = (struct udphdr *)(payload + iph->ihl * 4);
+        src_port = ntohs(udph->source);
+        dest_port = ntohs(udph->dest);
+
+        if (src_port == LOCAL_UDP_RELAY_PORT)
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+
+        if (is_connection_tracked(src_port))
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+
+        if (dest_port == 53 && !g_dns_via_proxy)
+            action = RULE_ACTION_DIRECT;
+        else
+            action = check_process_rule(src_ip, src_port, dest_ip, dest_port, true, &pid);
+
+        if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(dest_ip))
+            action = RULE_ACTION_DIRECT;
+
+        if (action == RULE_ACTION_PROXY && (dest_port == 67 || dest_port == 68))
+            action = RULE_ACTION_DIRECT;
+
+        // log (skip our own process)
+        if (g_connection_callback != NULL && pid > 0 && pid != g_current_process_id)
+        {
+            char process_name[MAX_PROCESS_NAME];
+            if (get_process_name_from_pid(pid, process_name, sizeof(process_name)))
+            {
+                if (!is_connection_already_logged(pid, dest_ip, dest_port, action))
+                {
+                    char dest_ip_str[32];
+                    format_ip_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
+
+                    char proxy_info[128];
+                    if (action == RULE_ACTION_PROXY)
+                    {
+                        snprintf(proxy_info, sizeof(proxy_info), "proxy socks5://%s:%d udp",
+                            g_proxy_host, g_proxy_port);
+                    }
+                    else if (action == RULE_ACTION_DIRECT)
+                    {
+                        snprintf(proxy_info, sizeof(proxy_info), "direct udp");
+                    }
+                    else if (action == RULE_ACTION_BLOCK)
+                    {
+                        snprintf(proxy_info, sizeof(proxy_info), "blocked udp");
+                    }
+
+                    const char* display_name = extract_filename(process_name);
+                    g_connection_callback(display_name, pid, dest_ip_str, dest_port, proxy_info);
+
+                    if (g_traffic_logging_enabled)
+                    {
+                        add_logged_connection(pid, dest_ip, dest_port, action);
+                    }
+                }
+            }
+        }
+
+        if (action == RULE_ACTION_DIRECT)
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+        else if (action == RULE_ACTION_BLOCK)
+            return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
+        else if (action == RULE_ACTION_PROXY)
+        {
+            add_connection(src_port, src_ip, dest_ip, dest_port);
+            
+            // add dynamic redirect rule for this source port
+            char cmd[256];
+            snprintf(cmd, sizeof(cmd), 
+                "iptables -t nat -A OUTPUT -p udp --sport %u -j REDIRECT --to-port %u 2>/dev/null",
+                src_port, LOCAL_UDP_RELAY_PORT);
+            system(cmd);
+            
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+        }
+    }
+
+    return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+}
+
+static void* packet_processor(void *arg)
+{
+    (void)arg;
+    char buf[4096] __attribute__((aligned));
+    int fd = nfq_fd(nfq_h);
+    ssize_t rv;
+
+    while (running)
+    {
+        rv = recv(fd, buf, sizeof(buf), 0);
+        if (rv >= 0)
+            nfq_handle_packet(nfq_h, buf, rv);
+    }
+
+    return NULL;
+}
+
+static inline uint32_t connection_hash(uint16_t port)
+{
+    return port % CONNECTION_HASH_SIZE;
+}
+
+static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip, uint16_t dest_port)
+{
+    uint32_t hash = connection_hash(src_port);
+    pthread_mutex_lock(&lock);
+
+    CONNECTION_INFO *conn = connection_hash_table[hash];
+    while (conn != NULL)
+    {
+        if (conn->src_port == src_port)
+        {
+            conn->orig_dest_ip = dest_ip;
+            conn->orig_dest_port = dest_port;
+            conn->src_ip = src_ip;
+            conn->is_tracked = true;
+            conn->last_activity = get_monotonic_ms();
+            pthread_mutex_unlock(&lock);
+            return;
+        }
+        conn = conn->next;
+    }
+
+    CONNECTION_INFO *new_conn = malloc(sizeof(CONNECTION_INFO));
+    if (new_conn != NULL)
+    {
+        new_conn->src_port = src_port;
+        new_conn->src_ip = src_ip;
+        new_conn->orig_dest_ip = dest_ip;
+        new_conn->orig_dest_port = dest_port;
+        new_conn->is_tracked = true;
+        new_conn->last_activity = get_monotonic_ms();
+        new_conn->next = connection_hash_table[hash];
+        connection_hash_table[hash] = new_conn;
+    }
+
+    pthread_mutex_unlock(&lock);
+}
+
+static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_port)
+{
+    uint32_t hash = connection_hash(src_port);
+    pthread_mutex_lock(&lock);
+
+    CONNECTION_INFO *conn = connection_hash_table[hash];
+    while (conn != NULL)
+    {
+        if (conn->src_port == src_port && conn->is_tracked)
+        {
+            *dest_ip = conn->orig_dest_ip;
+            *dest_port = conn->orig_dest_port;
+            conn->last_activity = get_monotonic_ms();
+            pthread_mutex_unlock(&lock);
+            return true;
+        }
+        conn = conn->next;
+    }
+
+    pthread_mutex_unlock(&lock);
+    return false;
+}
+
+static bool is_connection_tracked(uint16_t src_port)
+{
+    uint32_t hash = connection_hash(src_port);
+    pthread_mutex_lock(&lock);
+
+    CONNECTION_INFO *conn = connection_hash_table[hash];
+    while (conn != NULL)
+    {
+        if (conn->src_port == src_port && conn->is_tracked)
+        {
+            pthread_mutex_unlock(&lock);
+            return true;
+        }
+        conn = conn->next;
+    }
+
+    pthread_mutex_unlock(&lock);
+    return false;
+}
+
+static void remove_connection(uint16_t src_port)
+{
+    uint32_t hash = connection_hash(src_port);
+    pthread_mutex_lock(&lock);
+
+    CONNECTION_INFO **conn_ptr = &connection_hash_table[hash];
+    while (*conn_ptr != NULL)
+    {
+        if ((*conn_ptr)->src_port == src_port)
+        {
+            CONNECTION_INFO *to_free = *conn_ptr;
+            *conn_ptr = (*conn_ptr)->next;
+            free(to_free);
+            pthread_mutex_unlock(&lock);
+            return;
+        }
+        conn_ptr = &(*conn_ptr)->next;
+    }
+
+    pthread_mutex_unlock(&lock);
+}
+
+static void cleanup_stale_connections(void)
+{
+    uint64_t current_time = get_monotonic_ms();
+    pthread_mutex_lock(&lock);
+
+    for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
+    {
+        CONNECTION_INFO **conn_ptr = &connection_hash_table[i];
+        while (*conn_ptr != NULL)
+        {
+            if (current_time - (*conn_ptr)->last_activity > 120000)  // 120 sec timeout
+            {
+                CONNECTION_INFO *to_free = *conn_ptr;
+                *conn_ptr = (*conn_ptr)->next;
+                free(to_free);
+            }
+            else
+            {
+                conn_ptr = &(*conn_ptr)->next;
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&lock);
+}
+
+static bool is_connection_already_logged(uint32_t pid, uint32_t dest_ip, uint16_t dest_port, RuleAction action)
+{
+    pthread_mutex_lock(&lock);
+
+    LOGGED_CONNECTION *logged = logged_connections;
+    while (logged != NULL)
+    {
+        if (logged->pid == pid && logged->dest_ip == dest_ip && 
+            logged->dest_port == dest_port && logged->action == action)
+        {
+            pthread_mutex_unlock(&lock);
+            return true;
+        }
+        logged = logged->next;
+    }
+
+    pthread_mutex_unlock(&lock);
+    return false;
+}
+
+static void add_logged_connection(uint32_t pid, uint32_t dest_ip, uint16_t dest_port, RuleAction action)
+{
+    pthread_mutex_lock(&lock);
+
+    // keep only last 100 entries to avoid memory growth
+    int count = 0;
+    LOGGED_CONNECTION *temp = logged_connections;
+    while (temp != NULL && count < 100)
+    {
+        count++;
+        temp = temp->next;
+    }
+
+    if (count >= 100)
+    {
+        temp = logged_connections;
+        for (int i = 0; i < 98 && temp != NULL; i++)
+        {
+            temp = temp->next;
+        }
+
+        if (temp != NULL && temp->next != NULL)
+        {
+            LOGGED_CONNECTION *to_free_list = temp->next;
+            temp->next = NULL;
+
+            pthread_mutex_unlock(&lock);
+            while (to_free_list != NULL)
+            {
+                LOGGED_CONNECTION *next = to_free_list->next;
+                free(to_free_list);
+                to_free_list = next;
+            }
+            pthread_mutex_lock(&lock);
+        }
+    }
+
+    LOGGED_CONNECTION *logged = malloc(sizeof(LOGGED_CONNECTION));
+    if (logged != NULL)
+    {
+        logged->pid = pid;
+        logged->dest_ip = dest_ip;
+        logged->dest_port = dest_port;
+        logged->action = action;
+        logged->next = logged_connections;
+        logged_connections = logged;
+    }
+
+    pthread_mutex_unlock(&lock);
+}
+
+static void clear_logged_connections(void)
+{
+    pthread_mutex_lock(&lock);
+
+    while (logged_connections != NULL)
+    {
+        LOGGED_CONNECTION *to_free = logged_connections;
+        logged_connections = logged_connections->next;
+        free(to_free);
+    }
+
+    pthread_mutex_unlock(&lock);
+}
+
+static uint32_t pid_cache_hash(uint32_t src_ip, uint16_t src_port, bool is_udp)
+{
+    uint32_t hash = src_ip ^ ((uint32_t)src_port << 16) ^ (is_udp ? 0x80000000 : 0);
+    return hash % PID_CACHE_SIZE;
+}
+
+static uint32_t get_cached_pid(uint32_t src_ip, uint16_t src_port, bool is_udp)
+{
+    uint32_t hash = pid_cache_hash(src_ip, src_port, is_udp);
+    uint64_t current_time = get_monotonic_ms();
+    uint32_t pid = 0;
+
+    pthread_mutex_lock(&lock);
+
+    PID_CACHE_ENTRY *entry = pid_cache[hash];
+    while (entry != NULL)
+    {
+        if (entry->src_ip == src_ip &&
+            entry->src_port == src_port &&
+            entry->is_udp == is_udp)
+        {
+            if (current_time - entry->timestamp < PID_CACHE_TTL_MS)
+            {
+                pid = entry->pid;
+                break;
+            }
+            else
+            {
+                break;
+            }
+        }
+        entry = entry->next;
+    }
+
+    pthread_mutex_unlock(&lock);
+    return pid;
+}
+
+static void cache_pid(uint32_t src_ip, uint16_t src_port, uint32_t pid, bool is_udp)
+{
+    uint32_t hash = pid_cache_hash(src_ip, src_port, is_udp);
+    uint64_t current_time = get_monotonic_ms();
+
+    pthread_mutex_lock(&lock);
+
+    PID_CACHE_ENTRY *entry = pid_cache[hash];
+    while (entry != NULL)
+    {
+        if (entry->src_ip == src_ip &&
+            entry->src_port == src_port &&
+            entry->is_udp == is_udp)
+        {
+            entry->pid = pid;
+            entry->timestamp = current_time;
+            pthread_mutex_unlock(&lock);
+            return;
+        }
+        entry = entry->next;
+    }
+
+    PID_CACHE_ENTRY *new_entry = malloc(sizeof(PID_CACHE_ENTRY));
+    if (new_entry != NULL)
+    {
+        new_entry->src_ip = src_ip;
+        new_entry->src_port = src_port;
+        new_entry->pid = pid;
+        new_entry->timestamp = current_time;
+        new_entry->is_udp = is_udp;
+        new_entry->next = pid_cache[hash];
+        pid_cache[hash] = new_entry;
+    }
+
+    pthread_mutex_unlock(&lock);
+}
+
+static void clear_pid_cache(void)
+{
+    pthread_mutex_lock(&lock);
+
+    for (int i = 0; i < PID_CACHE_SIZE; i++)
+    {
+        while (pid_cache[i] != NULL)
+        {
+            PID_CACHE_ENTRY *to_free = pid_cache[i];
+            pid_cache[i] = pid_cache[i]->next;
+            free(to_free);
+        }
+    }
+
+    pthread_mutex_unlock(&lock);
+}
+
+static void* cleanup_worker(void *arg)
+{
+    (void)arg;
+    while (running)
+    {
+        sleep(30);
+        if (running)
+        {
+            cleanup_stale_connections();
+        }
+    }
+    return NULL;
+}
+
+static void update_has_active_rules(void)
+{
+    g_has_active_rules = false;
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        if (rule->enabled)
+        {
+            g_has_active_rules = true;
+            break;
+        }
+        rule = rule->next;
+    }
+}
+
+uint32_t ProxyBridge_AddRule(const char* process_name, const char* target_hosts, const char* target_ports, RuleProtocol protocol, RuleAction action)
+{
+    if (process_name == NULL || process_name[0] == '\0')
+        return 0;
+
+    PROCESS_RULE *rule = malloc(sizeof(PROCESS_RULE));
+    if (rule == NULL)
+        return 0;
+
+    rule->rule_id = g_next_rule_id++;
+    strncpy(rule->process_name, process_name, MAX_PROCESS_NAME - 1);
+    rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
+    rule->protocol = protocol;
+
+    if (target_hosts != NULL && target_hosts[0] != '\0')
+    {
+        rule->target_hosts = strdup(target_hosts);
+        if (rule->target_hosts == NULL)
+        {
+            free(rule);
+            return 0;
+        }
+    }
+    else
+    {
+        rule->target_hosts = strdup("*");
+        if (rule->target_hosts == NULL)
+        {
+            free(rule);
+            return 0;
+        }
+    }
+
+    if (target_ports != NULL && target_ports[0] != '\0')
+    {
+        rule->target_ports = strdup(target_ports);
+        if (rule->target_ports == NULL)
+        {
+            free(rule->target_hosts);
+            free(rule);
+            return 0;
+        }
+    }
+    else
+    {
+        rule->target_ports = strdup("*");
+        if (rule->target_ports == NULL)
+        {
+            free(rule->target_hosts);
+            free(rule);
+            return 0;
+        }
+    }
+
+    rule->action = action;
+    rule->enabled = true;
+    rule->next = rules_list;
+    rules_list = rule;
+
+    update_has_active_rules();
+    log_message("added rule id %u for process %s protocol %d action %d", rule->rule_id, process_name, protocol, action);
+
+    return rule->rule_id;
+}
+
+bool ProxyBridge_EnableRule(uint32_t rule_id)
+{
+    if (rule_id == 0)
+        return false;
+
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        if (rule->rule_id == rule_id)
+        {
+            rule->enabled = true;
+            update_has_active_rules();
+            log_message("enabled rule id %u", rule_id);
+            return true;
+        }
+        rule = rule->next;
+    }
+    return false;
+}
+
+bool ProxyBridge_DisableRule(uint32_t rule_id)
+{
+    if (rule_id == 0)
+        return false;
+
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        if (rule->rule_id == rule_id)
+        {
+            rule->enabled = false;
+            update_has_active_rules();
+            log_message("disabled rule id %u", rule_id);
+            return true;
+        }
+        rule = rule->next;
+    }
+    return false;
+}
+
+bool ProxyBridge_DeleteRule(uint32_t rule_id)
+{
+    if (rule_id == 0)
+        return false;
+
+    PROCESS_RULE *rule = rules_list;
+    PROCESS_RULE *prev = NULL;
+
+    while (rule != NULL)
+    {
+        if (rule->rule_id == rule_id)
+        {
+            if (prev == NULL)
+                rules_list = rule->next;
+            else
+                prev->next = rule->next;
+
+            if (rule->target_hosts != NULL)
+                free(rule->target_hosts);
+            if (rule->target_ports != NULL)
+                free(rule->target_ports);
+            free(rule);
+
+            update_has_active_rules();
+            log_message("deleted rule id %u", rule_id);
+            return true;
+        }
+        prev = rule;
+        rule = rule->next;
+    }
+    return false;
+}
+
+bool ProxyBridge_EditRule(uint32_t rule_id, const char* process_name, const char* target_hosts, const char* target_ports, RuleProtocol protocol, RuleAction action)
+{
+    if (rule_id == 0 || process_name == NULL || target_hosts == NULL || target_ports == NULL)
+        return false;
+
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        if (rule->rule_id == rule_id)
+        {
+            strncpy(rule->process_name, process_name, MAX_PROCESS_NAME - 1);
+            rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
+
+            if (rule->target_hosts != NULL)
+                free(rule->target_hosts);
+            rule->target_hosts = strdup(target_hosts);
+            if (rule->target_hosts == NULL)
+            {
+                return false;
+            }
+
+            if (rule->target_ports != NULL)
+                free(rule->target_ports);
+            rule->target_ports = strdup(target_ports);
+            if (rule->target_ports == NULL)
+            {
+                free(rule->target_hosts);
+                rule->target_hosts = NULL;
+                return false;
+            }
+
+            rule->protocol = protocol;
+            rule->action = action;
+
+            update_has_active_rules();
+            log_message("updated rule id %u", rule_id);
+            return true;
+        }
+        rule = rule->next;
+    }
+    return false;
+}
+
+bool ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, uint16_t proxy_port, const char* username, const char* password)
+{
+    if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
+        return false;
+
+    if (resolve_hostname(proxy_ip) == 0)
+        return false;
+
+    strncpy(g_proxy_host, proxy_ip, sizeof(g_proxy_host) - 1);
+    g_proxy_host[sizeof(g_proxy_host) - 1] = '\0';
+    g_proxy_port = proxy_port;
+    g_proxy_type = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
+
+    if (username != NULL)
+    {
+        strncpy(g_proxy_username, username, sizeof(g_proxy_username) - 1);
+        g_proxy_username[sizeof(g_proxy_username) - 1] = '\0';
+    }
+    else
+    {
+        g_proxy_username[0] = '\0';
+    }
+
+    if (password != NULL)
+    {
+        strncpy(g_proxy_password, password, sizeof(g_proxy_password) - 1);
+        g_proxy_password[sizeof(g_proxy_password) - 1] = '\0';
+    }
+    else
+    {
+        g_proxy_password[0] = '\0';
+    }
+
+    log_message("proxy configured %s %s:%d", type == PROXY_TYPE_HTTP ? "http" : "socks5", proxy_ip, proxy_port);
+    return true;
+}
+
+void ProxyBridge_SetDnsViaProxy(bool enable)
+{
+    g_dns_via_proxy = enable;
+    log_message("dns via proxy %s", enable ? "enabled" : "disabled");
+}
+
+void ProxyBridge_SetLogCallback(LogCallback callback)
+{
+    g_log_callback = callback;
+}
+
+void ProxyBridge_SetConnectionCallback(ConnectionCallback callback)
+{
+    g_connection_callback = callback;
+}
+
+void ProxyBridge_SetTrafficLoggingEnabled(bool enable)
+{
+    g_traffic_logging_enabled = enable;
+}
+
+void ProxyBridge_ClearConnectionLogs(void)
+{
+    clear_logged_connections();
+}
+
+bool ProxyBridge_Start(void)
+{
+    if (running)
+        return false;
+
+    running = true;
+    g_current_process_id = getpid();
+
+    if (pthread_create(&proxy_thread, NULL, local_proxy_server, NULL) != 0)
+    {
+        running = false;
+        return false;
+    }
+
+    if (pthread_create(&cleanup_thread, NULL, cleanup_worker, NULL) != 0)
+    {
+        running = false;
+        pthread_cancel(proxy_thread);
+        return false;
+    }
+
+    nfq_h = nfq_open();
+    if (!nfq_h)
+    {
+        log_message("nfq_open failed");
+        running = false;
+        return false;
+    }
+
+    if (nfq_unbind_pf(nfq_h, AF_INET) < 0)
+    {
+        log_message("nfq_unbind_pf failed");
+    }
+
+    if (nfq_bind_pf(nfq_h, AF_INET) < 0)
+    {
+        log_message("nfq_bind_pf failed");
+        nfq_close(nfq_h);
+        running = false;
+        return false;
+    }
+
+    nfq_qh = nfq_create_queue(nfq_h, 0, &packet_callback, NULL);
+    if (!nfq_qh)
+    {
+        log_message("nfq_create_queue failed");
+        nfq_close(nfq_h);
+        running = false;
+        return false;
+    }
+
+    if (nfq_set_mode(nfq_qh, NFQNL_COPY_PACKET, 0xffff) < 0)
+    {
+        log_message("nfq_set_mode failed");
+        nfq_destroy_queue(nfq_qh);
+        nfq_close(nfq_h);
+        running = false;
+        return false;
+    }
+
+    // setup iptables rules for packet interception - USE MANGLE table so it runs BEFORE nat
+    log_message("setting up iptables rules");
+    // mangle table runs before nat, so we can mark packets there
+    int ret1 = system("iptables -t mangle -A OUTPUT -p tcp -j NFQUEUE --queue-num 0");
+    int ret2 = system("iptables -t mangle -A OUTPUT -p udp -j NFQUEUE --queue-num 0");
+    
+    if (ret1 != 0 || ret2 != 0) {
+        log_message("failed to add iptables rules ret1=%d ret2=%d", ret1, ret2);
+    } else {
+        log_message("iptables nfqueue rules added successfully");
+    }
+    
+    // setup nat redirect for marked packets
+    int ret3 = system("iptables -t nat -A OUTPUT -p tcp -m mark --mark 1 -j REDIRECT --to-port 34010");
+    if (ret3 != 0) {
+        log_message("failed to add nat redirect rule");
+    }
+    
+    (void)ret3;
+
+    for (int i = 0; i < NUM_PACKET_THREADS; i++)
+    {
+        if (pthread_create(&packet_thread[i], NULL, packet_processor, NULL) != 0)
+        {
+            log_message("failed to create packet thread %d", i);
+        }
+    }
+
+    log_message("proxybridge started");
+    return true;
+}
+
+bool ProxyBridge_Stop(void)
+{
+    if (!running)
+        return false;
+
+    running = false;
+
+    // cleanup iptables
+    int ret1 = system("iptables -t mangle -D OUTPUT -p tcp -j NFQUEUE --queue-num 0 2>/dev/null");
+    int ret2 = system("iptables -t mangle -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null");
+    int ret3 = system("iptables -t nat -D OUTPUT -p tcp -m mark --mark 1 -j REDIRECT --to-port 34010 2>/dev/null");
+    (void)ret1;
+    (void)ret2;
+    (void)ret3;
+
+    for (int i = 0; i < NUM_PACKET_THREADS; i++)
+    {
+        if (packet_thread[i] != 0)
+        {
+            pthread_cancel(packet_thread[i]);
+            pthread_join(packet_thread[i], NULL);
+            packet_thread[i] = 0;
+        }
+    }
+
+    if (nfq_qh)
+    {
+        nfq_destroy_queue(nfq_qh);
+        nfq_qh = NULL;
+    }
+
+    if (nfq_h)
+    {
+        nfq_close(nfq_h);
+        nfq_h = NULL;
+    }
+
+    if (proxy_thread != 0)
+    {
+        pthread_cancel(proxy_thread);
+        pthread_join(proxy_thread, NULL);
+        proxy_thread = 0;
+    }
+
+    if (cleanup_thread != 0)
+    {
+        pthread_cancel(cleanup_thread);
+        pthread_join(cleanup_thread, NULL);
+        cleanup_thread = 0;
+    }
+
+    clear_logged_connections();
+    clear_pid_cache();
+
+    log_message("proxybridge stopped");
+    return true;
+}
+
+int ProxyBridge_TestConnection(const char* target_host, uint16_t target_port, char* result_buffer, size_t buffer_size)
+{
+    int test_sock = -1;
+    struct sockaddr_in proxy_addr;
+    struct hostent* host_info;
+    uint32_t target_ip;
+    int ret = -1;
+    char temp_buffer[512];
+
+    if (g_proxy_host[0] == '\0' || g_proxy_port == 0)
+    {
+        snprintf(result_buffer, buffer_size, "error no proxy configured");
+        return -1;
+    }
+
+    if (target_host == NULL || target_host[0] == '\0')
+    {
+        snprintf(result_buffer, buffer_size, "error invalid target host");
+        return -1;
+    }
+
+    snprintf(temp_buffer, sizeof(temp_buffer), "testing connection to %s:%d via %s proxy %s:%d\n",
+        target_host, target_port,
+        g_proxy_type == PROXY_TYPE_HTTP ? "http" : "socks5",
+        g_proxy_host, g_proxy_port);
+    strncpy(result_buffer, temp_buffer, buffer_size - 1);
+    result_buffer[buffer_size - 1] = '\0';
+
+    host_info = gethostbyname(target_host);
+    if (host_info == NULL)
+    {
+        snprintf(temp_buffer, sizeof(temp_buffer), "error failed to resolve hostname %s\n", target_host);
+        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        return -1;
+    }
+    target_ip = *(uint32_t*)host_info->h_addr_list[0];
+
+    snprintf(temp_buffer, sizeof(temp_buffer), "resolved %s to %d.%d.%d.%d\n",
+        target_host,
+        (target_ip >> 0) & 0xFF, (target_ip >> 8) & 0xFF,
+        (target_ip >> 16) & 0xFF, (target_ip >> 24) & 0xFF);
+    strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+
+    test_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (test_sock < 0)
+    {
+        snprintf(temp_buffer, sizeof(temp_buffer), "error socket creation failed\n");
+        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        return -1;
+    }
+
+    configure_tcp_socket(test_sock, 65536, 10000);
+
+    memset(&proxy_addr, 0, sizeof(proxy_addr));
+    proxy_addr.sin_family = AF_INET;
+    proxy_addr.sin_addr.s_addr = resolve_hostname(g_proxy_host);
+    proxy_addr.sin_port = htons(g_proxy_port);
+
+    snprintf(temp_buffer, sizeof(temp_buffer), "connecting to proxy %s:%d\n", g_proxy_host, g_proxy_port);
+    strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+
+    if (connect(test_sock, (struct sockaddr*)&proxy_addr, sizeof(proxy_addr)) < 0)
+    {
+        snprintf(temp_buffer, sizeof(temp_buffer), "error failed to connect to proxy\n");
+        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        close(test_sock);
+        return -1;
+    }
+
+    strncat(result_buffer, "connected to proxy server\n", buffer_size - strlen(result_buffer) - 1);
+
+    if (g_proxy_type == PROXY_TYPE_SOCKS5)
+    {
+        if (socks5_connect(test_sock, target_ip, target_port) != 0)
+        {
+            snprintf(temp_buffer, sizeof(temp_buffer), "error socks5 handshake failed\n");
+            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            close(test_sock);
+            return -1;
+        }
+        strncat(result_buffer, "socks5 handshake successful\n", buffer_size - strlen(result_buffer) - 1);
+    }
+    else
+    {
+        if (http_connect(test_sock, target_ip, target_port) != 0)
+        {
+            snprintf(temp_buffer, sizeof(temp_buffer), "error http connect failed\n");
+            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            close(test_sock);
+            return -1;
+        }
+        strncat(result_buffer, "http connect successful\n", buffer_size - strlen(result_buffer) - 1);
+    }
+
+    char http_request[512];
+    snprintf(http_request, sizeof(http_request),
+        "GET / HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Connection: close\r\n"
+        "User-Agent: ProxyBridge/1.0\r\n"
+        "\r\n", target_host);
+
+    if (send_all(test_sock, http_request, strlen(http_request)) < 0)
+    {
+        snprintf(temp_buffer, sizeof(temp_buffer), "error failed to send test request\n");
+        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        close(test_sock);
+        return -1;
+    }
+
+    strncat(result_buffer, "sent http get request\n", buffer_size - strlen(result_buffer) - 1);
+    char response[1024];
+    ssize_t bytes_received = recv(test_sock, response, sizeof(response) - 1, 0);
+    if (bytes_received > 0)
+    {
+        response[bytes_received] = '\0';
+
+        if (strstr(response, "HTTP/") != NULL)
+        {
+            char* status_line = strstr(response, "HTTP/");
+            int status_code = 0;
+            if (status_line != NULL)
+            {
+                sscanf(status_line, "HTTP/%*s %d", &status_code);
+            }
+
+            snprintf(temp_buffer, sizeof(temp_buffer), "success received http %d response %ld bytes\n", status_code, (long)bytes_received);
+            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            ret = 0;
+        }
+        else
+        {
+            snprintf(temp_buffer, sizeof(temp_buffer), "error received data but not valid http response\n");
+            strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+            ret = -1;
+        }
+    }
+    else
+    {
+        snprintf(temp_buffer, sizeof(temp_buffer), "error failed to receive response\n");
+        strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
+        ret = -1;
+    }
+
+    close(test_sock);
+
+    if (ret == 0)
+    {
+        strncat(result_buffer, "\nproxy connection test passed\n", buffer_size - strlen(result_buffer) - 1);
+    }
+    else
+    {
+        strncat(result_buffer, "\nproxy connection test failed\n", buffer_size - strlen(result_buffer) - 1);
+    }
+
+    return ret;
+}
