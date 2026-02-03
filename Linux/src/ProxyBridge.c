@@ -1793,27 +1793,89 @@ static void remove_connection(uint16_t src_port)
 
 static void cleanup_stale_connections(void)
 {
-    uint64_t current_time = get_monotonic_ms();
-    pthread_mutex_lock(&lock);
+    uint64_t now = get_monotonic_ms();
+    int removed = 0;
 
+    // Process each hash bucket with minimal lock time
     for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
     {
+        pthread_mutex_lock(&lock);
         CONNECTION_INFO **conn_ptr = &connection_hash_table[i];
+
         while (*conn_ptr != NULL)
         {
-            if (current_time - (*conn_ptr)->last_activity > 120000)  // 120 sec timeout
+            if (now - (*conn_ptr)->last_activity > 60000)  // 60 sec timeout (same as Windows)
             {
                 CONNECTION_INFO *to_free = *conn_ptr;
                 *conn_ptr = (*conn_ptr)->next;
-                free(to_free);
+                pthread_mutex_unlock(&lock);
+                free(to_free);  // Free outside lock
+                removed++;
+                pthread_mutex_lock(&lock);
             }
             else
             {
                 conn_ptr = &(*conn_ptr)->next;
             }
         }
+        pthread_mutex_unlock(&lock);
     }
 
+    // Cleanup PID cache
+    uint64_t now_cache = get_monotonic_ms();
+    int cache_removed = 0;
+    for (int i = 0; i < PID_CACHE_SIZE; i++)
+    {
+        pthread_mutex_lock(&lock);
+        PID_CACHE_ENTRY **entry_ptr = &pid_cache[i];
+        while (*entry_ptr != NULL)
+        {
+            if (now_cache - (*entry_ptr)->timestamp > 10000)  // 10 sec cache TTL
+            {
+                PID_CACHE_ENTRY *to_free = *entry_ptr;
+                *entry_ptr = (*entry_ptr)->next;
+                pthread_mutex_unlock(&lock);
+                free(to_free);  // Free outside lock
+                cache_removed++;
+                pthread_mutex_lock(&lock);
+            }
+            else
+            {
+                entry_ptr = &(*entry_ptr)->next;
+            }
+        }
+        pthread_mutex_unlock(&lock);
+    }
+
+    // Keep only last 100 logged connections for memory efficiency
+    pthread_mutex_lock(&lock);
+    int logged_count = 0;
+    LOGGED_CONNECTION *temp = logged_connections;
+    while (temp != NULL)
+    {
+        logged_count++;
+        temp = temp->next;
+    }
+
+    if (logged_count > 100)
+    {
+        temp = logged_connections;
+        for (int i = 0; i < 99 && temp != NULL; i++)
+        {
+            temp = temp->next;
+        }
+        if (temp != NULL && temp->next != NULL)
+        {
+            LOGGED_CONNECTION *to_free = temp->next;
+            temp->next = NULL;
+            while (to_free != NULL)
+            {
+                LOGGED_CONNECTION *next = to_free->next;
+                free(to_free);
+                to_free = next;
+            }
+        }
+    }
     pthread_mutex_unlock(&lock);
 }
 
@@ -1999,7 +2061,7 @@ static void* cleanup_worker(void *arg)
     (void)arg;
     while (running)
     {
-        sleep(30);
+        sleep(30);  // 30 seconds
         if (running)
         {
             cleanup_stale_connections();
@@ -2333,8 +2395,15 @@ bool ProxyBridge_Start(void)
         nfq_destroy_queue(nfq_qh);
         nfq_close(nfq_h);
         running = false;
+        pthread_cancel(cleanup_thread);
+        pthread_cancel(proxy_thread);
+        if (udp_relay_thread != 0)
+            pthread_cancel(udp_relay_thread);
         return false;
     }
+
+    // Set larger queue length for better performance (16384 like Windows)
+    nfq_set_queue_maxlen(nfq_qh, 16384);
 
     // setup iptables rules for packet interception - USE MANGLE table so it runs BEFORE nat
     log_message("setting up iptables rules");
@@ -2429,6 +2498,19 @@ bool ProxyBridge_Stop(void)
         pthread_join(cleanup_thread, NULL);
         cleanup_thread = 0;
     }
+
+    // Free all connections in hash table
+    pthread_mutex_lock(&lock);
+    for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
+    {
+        while (connection_hash_table[i] != NULL)
+        {
+            CONNECTION_INFO *to_free = connection_hash_table[i];
+            connection_hash_table[i] = connection_hash_table[i]->next;
+            free(to_free);
+        }
+    }
+    pthread_mutex_unlock(&lock);
 
     clear_logged_connections();
     clear_pid_cache();
@@ -2593,4 +2675,24 @@ int ProxyBridge_TestConnection(const char* target_host, uint16_t target_port, ch
     }
 
     return ret;
+}
+
+// Library destructor - automatically cleanup when library is unloaded
+__attribute__((destructor))
+static void library_cleanup(void)
+{
+    if (running)
+    {
+        log_message("library unloading - cleaning up automatically");
+        ProxyBridge_Stop();
+    }
+    else
+    {
+        // Even if not running, ensure iptables rules are removed
+        // This handles cases where the app crashed before calling Stop
+        system("iptables -t mangle -D OUTPUT -p tcp -j NFQUEUE --queue-num 0 2>/dev/null");
+        system("iptables -t mangle -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null");
+        system("iptables -t nat -D OUTPUT -p tcp -m mark --mark 1 -j REDIRECT --to-port 34010 2>/dev/null");
+        system("iptables -t nat -D OUTPUT -p udp -m mark --mark 2 -j REDIRECT --to-port 34011 2>/dev/null");
+    }
 }

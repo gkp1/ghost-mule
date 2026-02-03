@@ -1,6 +1,14 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -fPIC -D_GNU_SOURCE
-LDFLAGS = -shared
+CFLAGS = -Wall -Wextra -O3 -fPIC -D_GNU_SOURCE \
+	-fstack-protector-strong \
+	-D_FORTIFY_SOURCE=2 \
+	-fPIE \
+	-Wformat -Wformat-security \
+	-Werror=format-security \
+	-fno-strict-overflow \
+	-fno-delete-null-pointer-checks \
+	-fwrapv
+LDFLAGS = -shared -Wl,-z,relro,-z,now -Wl,-z,noexecstack -s
 LIBS = -lpthread -lnetfilter_queue -lnfnetlink
 
 TARGET = libproxybridge.so
@@ -11,6 +19,8 @@ all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+	@echo "Stripping debug symbols..."
+	strip --strip-unneeded $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
