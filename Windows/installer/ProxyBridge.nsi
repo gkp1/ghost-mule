@@ -7,6 +7,16 @@
 
 Unicode True
 
+; Version Information
+VIProductVersion "3.1.0.0"
+VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
+VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}"
+VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"
+VIAddVersionKey "LegalCopyright" "Copyright (c) 2026 ${PRODUCT_PUBLISHER}"
+VIAddVersionKey "FileDescription" "${PRODUCT_NAME} Setup"
+VIAddVersionKey "FileVersion" "${PRODUCT_VERSION}"
+VIAddVersionKey "Comments" "Network Proxy Bridge Application"
+
 !include "MUI2.nsh"
 
 SetCompressor /SOLID lzma

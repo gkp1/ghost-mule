@@ -2,11 +2,13 @@ name: Release ProxyBridge Windows
 
 on:
   release:
-    types: [created]
+    types: [published, created]
+  workflow_dispatch:
 
 jobs:
   build-and-release:
     runs-on: self-hosted
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner)
 
     steps:
     - name: Checkout code
@@ -15,7 +17,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '9.0.x'
+        dotnet-version: '10.0.x'
 
     - name: Verify WinDivert installation
       run: |
