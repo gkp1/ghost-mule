@@ -7,7 +7,9 @@
 #include <errno.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/epoll.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
@@ -92,6 +94,18 @@ static LOGGED_CONNECTION *logged_connections = NULL;
 static PROCESS_RULE *rules_list = NULL;
 static uint32_t g_next_rule_id = 1;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+    int client_socket;
+    uint32_t orig_dest_ip;
+    uint16_t orig_dest_port;
+} connection_config_t;
+
+typedef struct {
+    int from_socket;
+    int to_socket;
+} transfer_config_t;
+
 static struct nfq_handle *nfq_h = NULL;
 static struct nfq_q_handle *nfq_qh = NULL;
 static pthread_t packet_thread[NUM_PACKET_THREADS] = {0};
@@ -952,114 +966,153 @@ static int http_connect(int s, uint32_t dest_ip, uint16_t dest_port)
     return 0;
 }
 
-static void* transfer_handler(void *arg)
-{
-    TRANSFER_CONFIG *config = arg;
-    char buffer[65536];
-    ssize_t n;
+// ===== EPOLL RELAY FUNCTIONS (Production) =====
 
-    while ((n = recv(config->from_socket, buffer, sizeof(buffer), 0)) > 0)
-    {
-        if (send_all(config->to_socket, buffer, n) < 0)
-            break;
-    }
-
-    shutdown(config->from_socket, SHUT_RD);
-    shutdown(config->to_socket, SHUT_WR);
-    free(config);
-    return NULL;
-}
-
+// Windows-style connection handler - blocks on connect and handshake, then calls transfer_handler
 static void* connection_handler(void *arg)
 {
-    CONNECTION_CONFIG *config = arg;
+    connection_config_t *config = (connection_config_t *)arg;
     int client_sock = config->client_socket;
     uint32_t dest_ip = config->orig_dest_ip;
     uint16_t dest_port = config->orig_dest_port;
-    int socks_sock;
-    struct sockaddr_in socks_addr;
-    uint32_t socks5_ip;
+    int proxy_sock;
+    struct sockaddr_in proxy_addr;
+    uint32_t proxy_ip;
 
     free(config);
 
-    socks5_ip = resolve_hostname(g_proxy_host);
-    if (socks5_ip == 0)
+    // Connect to proxy
+    proxy_ip = resolve_hostname(g_proxy_host);
+    if (proxy_ip == 0)
     {
         close(client_sock);
         return NULL;
     }
 
-    socks_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (socks_sock < 0)
+    proxy_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (proxy_sock < 0)
     {
-        log_message("socket creation failed %d", errno);
         close(client_sock);
         return NULL;
     }
 
-    configure_tcp_socket(socks_sock, 524288, 30000);
+    configure_tcp_socket(proxy_sock, 524288, 30000);
     configure_tcp_socket(client_sock, 524288, 30000);
 
-    memset(&socks_addr, 0, sizeof(socks_addr));
-    socks_addr.sin_family = AF_INET;
-    socks_addr.sin_addr.s_addr = socks5_ip;
-    socks_addr.sin_port = htons(g_proxy_port);
+    memset(&proxy_addr, 0, sizeof(proxy_addr));
+    proxy_addr.sin_family = AF_INET;
+    proxy_addr.sin_addr.s_addr = proxy_ip;
+    proxy_addr.sin_port = htons(g_proxy_port);
 
-    if (connect(socks_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) < 0)
+    if (connect(proxy_sock, (struct sockaddr *)&proxy_addr, sizeof(proxy_addr)) < 0)
     {
-        log_message("failed to connect to proxy %d", errno);
         close(client_sock);
-        close(socks_sock);
+        close(proxy_sock);
         return NULL;
     }
 
+    // Do blocking handshake
     if (g_proxy_type == PROXY_TYPE_SOCKS5)
     {
-        if (socks5_connect(socks_sock, dest_ip, dest_port) != 0)
+        if (socks5_connect(proxy_sock, dest_ip, dest_port) != 0)
         {
             close(client_sock);
-            close(socks_sock);
+            close(proxy_sock);
             return NULL;
         }
     }
     else if (g_proxy_type == PROXY_TYPE_HTTP)
     {
-        if (http_connect(socks_sock, dest_ip, dest_port) != 0)
+        if (http_connect(proxy_sock, dest_ip, dest_port) != 0)
         {
             close(client_sock);
-            close(socks_sock);
+            close(proxy_sock);
             return NULL;
         }
     }
 
-    TRANSFER_CONFIG *client_to_socks = malloc(sizeof(TRANSFER_CONFIG));
-    TRANSFER_CONFIG *socks_to_client = malloc(sizeof(TRANSFER_CONFIG));
-
-    if (!client_to_socks || !socks_to_client)
+    // Create transfer config
+    transfer_config_t *transfer_config = (transfer_config_t *)malloc(sizeof(transfer_config_t));
+    if (transfer_config == NULL)
     {
         close(client_sock);
-        close(socks_sock);
-        free(client_to_socks);
-        free(socks_to_client);
+        close(proxy_sock);
         return NULL;
     }
 
-    client_to_socks->from_socket = client_sock;
-    client_to_socks->to_socket = socks_sock;
-    socks_to_client->from_socket = socks_sock;
-    socks_to_client->to_socket = client_sock;
+    transfer_config->from_socket = client_sock;
+    transfer_config->to_socket = proxy_sock;
 
-    pthread_t transfer_thread;
-    pthread_create(&transfer_thread, NULL, transfer_handler, client_to_socks);
-    pthread_detach(transfer_thread);
+    // Do bidirectional transfer in this thread (like Windows)
+    transfer_handler((void*)transfer_config);
 
-    transfer_handler(socks_to_client);
-
-    close(client_sock);
-    close(socks_sock);
     return NULL;
 }
 
+// Windows-style transfer handler - uses select() to monitor both sockets
+static void* transfer_handler(void *arg)
+{
+    transfer_config_t *config = (transfer_config_t *)arg;
+    int sock1 = config->from_socket;  // client socket
+    int sock2 = config->to_socket;    // proxy socket
+    char buf[131072];  // 128KB buffer
+    int len;
+
+    free(config);
+
+    // Monitor BOTH sockets in one thread (like Windows)
+    while (1)
+    {
+        fd_set readfds;
+        struct timeval timeout;
+
+        FD_ZERO(&readfds);
+        FD_SET(sock1, &readfds);  // client
+        FD_SET(sock2, &readfds);  // proxy
+
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 50000;  // 50ms
+
+        int ready = select(FD_SETSIZE, &readfds, NULL, NULL, &timeout);
+
+        if (ready < 0)
+            break;
+
+        if (ready == 0)
+            continue;
+
+        // Check client to proxy
+        if (FD_ISSET(sock1, &readfds))
+        {
+            len = recv(sock1, buf, sizeof(buf), 0);
+            if (len <= 0)
+                break;
+
+            if (send_all(sock2, buf, len) < 0)
+                break;
+        }
+
+        // Check proxy to client
+        if (FD_ISSET(sock2, &readfds))
+        {
+            len = recv(sock2, buf, sizeof(buf), 0);
+            if (len <= 0)
+                break;
+
+            if (send_all(sock1, buf, len) < 0)
+                break;
+        }
+    }
+
+    // Cleanup
+    shutdown(sock1, SHUT_RDWR);
+    shutdown(sock2, SHUT_RDWR);
+    close(sock1);
+    close(sock2);
+    return NULL;
+}
+
+// Windows-style proxy server - accepts and spawns thread per connection
 static void* local_proxy_server(void *arg)
 {
     (void)arg;
@@ -1070,14 +1123,12 @@ static void* local_proxy_server(void *arg)
     listen_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_sock < 0)
     {
-        log_message("socket creation failed %d", errno);
+        log_message("Socket creation failed");
         return NULL;
     }
 
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-
-    int nodelay = 1;
-    setsockopt(listen_sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+    setsockopt(listen_sock, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -1086,19 +1137,19 @@ static void* local_proxy_server(void *arg)
 
     if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
-        log_message("bind failed %d", errno);
+        log_message("Bind failed");
         close(listen_sock);
         return NULL;
     }
 
     if (listen(listen_sock, SOMAXCONN) < 0)
     {
-        log_message("listen failed %d", errno);
+        log_message("Listen failed");
         close(listen_sock);
         return NULL;
     }
 
-    log_message("local proxy listening on port %d", g_local_relay_port);
+    log_message("Local proxy listening on port %d", g_local_relay_port);
 
     while (running)
     {
@@ -1107,7 +1158,7 @@ static void* local_proxy_server(void *arg)
         FD_SET(listen_sock, &read_fds);
         struct timeval timeout = {1, 0};
 
-        if (select(listen_sock + 1, &read_fds, NULL, NULL, &timeout) <= 0)
+        if (select(FD_SETSIZE, &read_fds, NULL, NULL, &timeout) <= 0)
             continue;
 
         struct sockaddr_in client_addr;
@@ -1117,10 +1168,7 @@ static void* local_proxy_server(void *arg)
         if (client_sock < 0)
             continue;
 
-        log_message("[RELAY] accepted connection from %s:%u", 
-            inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
-
-        CONNECTION_CONFIG *conn_config = malloc(sizeof(CONNECTION_CONFIG));
+        connection_config_t *conn_config = (connection_config_t *)malloc(sizeof(connection_config_t));
         if (conn_config == NULL)
         {
             close(client_sock);
@@ -1132,20 +1180,14 @@ static void* local_proxy_server(void *arg)
         uint16_t client_port = ntohs(client_addr.sin_port);
         if (!get_connection(client_port, &conn_config->orig_dest_ip, &conn_config->orig_dest_port))
         {
-            log_message("[RELAY] no connection tracking for port %u", client_port);
             close(client_sock);
             free(conn_config);
             continue;
         }
-        
-        char dest_str[32];
-        format_ip_address(conn_config->orig_dest_ip, dest_str, sizeof(dest_str));
-        log_message("[RELAY] forwarding to %s:%u via proxy", dest_str, conn_config->orig_dest_port);
 
         pthread_t conn_thread;
-        if (pthread_create(&conn_thread, NULL, connection_handler, conn_config) != 0)
+        if (pthread_create(&conn_thread, NULL, connection_handler, (void*)conn_config) != 0)
         {
-            log_message("pthread_create failed %d", errno);
             close(client_sock);
             free(conn_config);
             continue;
