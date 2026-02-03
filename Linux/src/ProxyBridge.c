@@ -468,6 +468,14 @@ static bool get_process_name_from_pid(uint32_t pid, char *name, size_t name_size
     if (pid == 0)
         return false;
 
+    // PID 1 is reserved for init/systemd on Linux
+    // Similar to Windows PID 4 (System), some system processes use PID 1
+    if (pid == 1)
+    {
+        snprintf(name, name_size, "systemd");
+        return true;
+    }
+
     char path[64];
     snprintf(path, sizeof(path), "/proc/%u/exe", pid);
     
@@ -670,11 +678,25 @@ static uint32_t resolve_hostname(const char *hostname)
 
 static bool is_broadcast_or_multicast(uint32_t ip)
 {
+    // Localhost: 127.0.0.0/8 (127.x.x.x)
     uint8_t first_octet = (ip >> 0) & 0xFF;
-    
+    if (first_octet == 127)
+        return true;
+
+    // APIPA (Link-Local): 169.254.0.0/16 (169.254.x.x)
+    uint8_t second_octet = (ip >> 8) & 0xFF;
+    if (first_octet == 169 && second_octet == 254)
+        return true;
+
+    // Broadcast: 255.255.255.255
     if (ip == 0xFFFFFFFF)
         return true;
-    
+
+    // x.x.x.255 (subnet broadcasts)
+    if ((ip & 0xFF000000) == 0xFF000000)
+        return true;
+
+    // Multicast: 224.0.0.0 - 239.255.255.255 (first octet 224-239)
     if (first_octet >= 224 && first_octet <= 239)
         return true;
 
