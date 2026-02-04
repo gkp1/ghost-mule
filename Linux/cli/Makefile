@@ -8,10 +8,11 @@ CFLAGS = -Wall -Wextra -O3 -I../src \
 	-fno-strict-overflow \
 	-fno-delete-null-pointer-checks \
 	-fwrapv
-LDFLAGS = -L../src -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack -s
+LDFLAGS = -L../src -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack -s \
+	-Wl,-rpath,/usr/local/lib
 LIBS = -lproxybridge -lpthread
 
-TARGET = proxybridge-cli
+TARGET = ProxyBridge
 SOURCES = main.c
 OBJECTS = $(SOURCES:.c=.o)
 

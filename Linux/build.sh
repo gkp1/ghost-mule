@@ -35,7 +35,7 @@ cd "$SCRIPT_DIR/cli"
 make clean 2>/dev/null || true
 make
 
-if [ -f "proxybridge-cli" ]; then
+if [ -f "ProxyBridge" ]; then
     echo "✓ CLI build successful"
 else
     echo "✗ CLI build failed!"
@@ -46,7 +46,7 @@ echo ""
 # Move binaries to output
 echo "Moving binaries to output directory..."
 mv "$SCRIPT_DIR/src/libproxybridge.so" "$OUTPUT_DIR/"
-mv proxybridge-cli "$OUTPUT_DIR/"
+mv ProxyBridge "$OUTPUT_DIR/"
 echo "✓ Binaries moved to output"
 echo ""
 
@@ -69,3 +69,4 @@ cd "$OUTPUT_DIR"
 ls -lh
 echo ""
 echo "Output location: $OUTPUT_DIR"
+
