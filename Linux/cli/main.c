@@ -101,8 +101,9 @@ static void show_help(const char* prog)
     printf("                           *:*:53:UDP:PROXY\n");
     printf("                           firefox:*:80;443:TCP:DIRECT\n\n");
     
-    printf("  --dns-via-proxy        Route DNS queries through proxy (default: true)\n");
-    printf("  --no-dns-via-proxy     Do not route DNS queries through proxy\n\n");
+    printf("  --dns-via-proxy <bool> Route DNS queries through proxy\n");
+    printf("                         Values: true, false, 1, 0\n");
+    printf("                         Default: true\n\n");
     
     printf("  --verbose <level>      Logging verbosity level\n");
     printf("                           0 - No logs (default)\n");
@@ -128,7 +129,7 @@ static void show_help(const char* prog)
     printf("  # Route DNS through proxy with multiple apps\n");
     printf("  sudo %s --proxy socks5://127.0.0.1:1080 \\\n", prog);
     printf("       --rule \"curl;wget;firefox:*:*:BOTH:PROXY\" \\\n");
-    printf("       --dns-via-proxy --verbose 3\n\n");
+    printf("       --dns-via-proxy true --verbose 3\n\n");
     
     printf("NOTE:\n");
     printf("  ProxyBridge requires root privileges to use nfqueue.\n");
@@ -338,13 +339,18 @@ int main(int argc, char *argv[])
                 return 1;
             num_rules++;
         }
-        else if (strcmp(argv[i], "--dns-via-proxy") == 0)
+        else if (strcmp(argv[i], "--dns-via-proxy") == 0 && i + 1 < argc)
         {
-            dns_via_proxy = true;
-        }
-        else if (strcmp(argv[i], "--no-dns-via-proxy") == 0)
-        {
-            dns_via_proxy = false;
+            char* value = argv[++i];
+            if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0)
+                dns_via_proxy = true;
+            else if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0)
+                dns_via_proxy = false;
+            else
+            {
+                fprintf(stderr, "ERROR: Invalid value for --dns-via-proxy. Use: true, false, 1, or 0\n");
+                return 1;
+            }
         }
         else if (strcmp(argv[i], "--verbose") == 0 && i + 1 < argc)
         {
@@ -383,14 +389,23 @@ int main(int argc, char *argv[])
     if (!parse_proxy_url(proxy_url, &proxy_type, proxy_host, &proxy_port, proxy_username, proxy_password))
         return 1;
     
-    // Setup callbacks based on verbose level
+    // Setup callbacks based on verbose level - only enable what we need
+    // Verbose 0: No callbacks, no logging (most efficient)
+    // Verbose 1: Only log messages
+    // Verbose 2: Only connection events
+    // Verbose 3: Both logs and connections
+    
     if (verbose_level == 1 || verbose_level == 3)
         ProxyBridge_SetLogCallback(log_callback);
+    else
+        ProxyBridge_SetLogCallback(NULL);  // Explicitly disable
     
     if (verbose_level == 2 || verbose_level == 3)
         ProxyBridge_SetConnectionCallback(connection_callback);
+    else
+        ProxyBridge_SetConnectionCallback(NULL);  // Explicitly disable
     
-    // Enable traffic logging only if needed
+    // Enable traffic logging in C library only when needed (prevents unnecessary processing)
     ProxyBridge_SetTrafficLoggingEnabled(verbose_level > 0);
     
     // Display configuration

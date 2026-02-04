@@ -684,10 +684,6 @@ static uint32_t resolve_hostname(const char *hostname)
     uint32_t resolved_ip = addr->sin_addr.s_addr;
     freeaddrinfo(result);
 
-    log_message("resolved %s to %d.%d.%d.%d", hostname,
-        (resolved_ip >> 0) & 0xFF, (resolved_ip >> 8) & 0xFF,
-        (resolved_ip >> 16) & 0xFF, (resolved_ip >> 24) & 0xFF);
-
     return resolved_ip;
 }
 
@@ -1150,8 +1146,6 @@ static void* local_proxy_server(void *arg)
         return NULL;
     }
 
-    log_message("Local proxy listening on port %d", g_local_relay_port);
-
     while (running)
     {
         fd_set read_fds;
@@ -1332,7 +1326,6 @@ static bool establish_udp_associate(void)
     configure_udp_socket(socks5_udp_send_socket, 262144, 30000);
 
     udp_associate_connected = true;
-    log_message("[UDP] ASSOCIATE established with SOCKS5 proxy");
     return true;
 }
 
@@ -1365,10 +1358,6 @@ static void* udp_relay_server(void *arg)
     }
 
     udp_associate_connected = establish_udp_associate();
-
-    log_message("[UDP] relay listening on port %d", LOCAL_UDP_RELAY_PORT);
-    if (!udp_associate_connected)
-        log_message("[UDP] ASSOCIATE not available yet - will retry when needed");
 
     while (running)
     {
@@ -1603,7 +1592,6 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
             add_connection(src_port, src_ip, dest_ip, dest_port);
             
             // mark packet so nat table REDIRECT rule will catch it
-            log_message("[REDIRECT] marking packet sport %u for redirect", src_port);
             uint32_t mark = 1;
             return nfq_set_verdict2(qh, id, NF_ACCEPT, mark, 0, NULL);
         }
