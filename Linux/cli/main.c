@@ -66,7 +66,7 @@ static void show_banner(void)
     printf(" | |_) | '__/ _ \\ \\/ / | | | |  _ \\| '__| |/ _` |/ _` |/ _ \\\n");
     printf(" |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/\n");
     printf(" |_|   |_|  \\___/_/\\_\\\\__, | |____/|_|  |_|\\__,_|\\__, |\\___|\n");
-    printf("                      |___/                      |___/  V3.1.0\n");
+    printf("                      |___/                      |___/  V4.0-Beta\n");
     printf("\n");
     printf("  Universal proxy client for Linux applications\n");
     printf("\n");
@@ -109,6 +109,9 @@ static void show_help(const char* prog)
     printf("                           1 - Show log messages only\n");
     printf("                           2 - Show connection events only\n");
     printf("                           3 - Show both logs and connections\n\n");
+    
+    printf("  --cleanup              Cleanup resources (iptables, etc.) from crashed instance\n");
+    printf("                         Use if ProxyBridge crashed without proper cleanup\n\n");
     
     printf("  --help, -h             Show this help message\n\n");
     
@@ -294,6 +297,18 @@ static bool is_root(void)
 
 int main(int argc, char *argv[])
 {
+    // Check for cleanup flag first - ignores all other args
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "--cleanup") == 0)
+        {
+            printf("Running cleanup...\n");
+            ProxyBridge_Stop();
+            printf("Cleanup complete.\n");
+            return 0;
+        }
+    }
+    
     char proxy_url[512] = "socks5://127.0.0.1:4444";
     ProxyRule rules[MAX_RULES];
     int num_rules = 0;
