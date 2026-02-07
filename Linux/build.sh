@@ -51,10 +51,17 @@ if pkg-config --exists gtk+-3.0; then
     GUI_CFLAGS="-Wall -Wno-unused-parameter -O3 -Isrc -D_GNU_SOURCE -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -Wformat -Wformat-security -Werror=format-security -fno-strict-overflow -fno-delete-null-pointer-checks -fwrapv $(pkg-config --cflags gtk+-3.0)"
     GUI_LDFLAGS="-Lsrc -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack -s -Wl,-rpath,'$ORIGIN/.' -lproxybridge -lpthread $(pkg-config --libs gtk+-3.0) -export-dynamic"
 
-    gcc $GUI_CFLAGS -c gui/main.c -o gui_main.o
-    gcc -o ProxyBridgeGUI gui_main.o $GUI_LDFLAGS
+    # Compile all GUI source files
+    GUI_OBJS=""
+    for src in gui/*.c; do
+        obj="${src%.c}.o"
+        gcc $GUI_CFLAGS -c "$src" -o "$obj"
+        GUI_OBJS="$GUI_OBJS $obj"
+    done
+
+    gcc -o ProxyBridgeGUI $GUI_OBJS $GUI_LDFLAGS
     
-    rm -f gui_main.o
+    rm -f gui/*.o
     echo "GUI build successful"
 else
     echo "GTK3 not found. Skipping GUI build."

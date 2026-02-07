@@ -66,4 +66,44 @@ typedef struct {
     GtkWidget *btn;
 } TestResultData;
 
+// --- Globals (External) ---
+extern GtkWidget *window;
+extern GtkTextBuffer *conn_buffer;
+extern GtkTextBuffer *log_buffer;
+extern GtkWidget *status_bar;
+extern guint status_context_id;
+
+extern char g_proxy_ip[256];
+extern uint16_t g_proxy_port;
+extern ProxyType g_proxy_type;
+extern char g_proxy_user[256];
+extern char g_proxy_pass[256];
+
+extern GList *g_rules_list;
+
+// --- Function Prototypes ---
+
+// Utils
+long safe_strtol(const char *nptr);
+void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...);
+void trim_buffer_lines(GtkTextBuffer *buffer, int max_lines);
+char* get_current_time_str();
+char *escape_json_string(const char *src);
+char *extract_sub_json_str(const char *json, const char *key);
+bool extract_sub_json_bool(const char *json, const char *key);
+
+// Settings
+void on_proxy_configure(GtkWidget *widget, gpointer data);
+
+// Rules
+void on_proxy_rules_clicked(GtkWidget *widget, gpointer data);
+
+// Logs
+void lib_log_callback(const char *message);
+void lib_connection_callback(const char *process_name, uint32_t pid, const char *dest_ip, uint16_t dest_port, const char *proxy_info);
+void on_search_conn_changed(GtkSearchEntry *entry, gpointer user_data);
+void on_search_log_changed(GtkSearchEntry *entry, gpointer user_data);
+void on_clear_conn_clicked(GtkButton *button, gpointer user_data);
+void on_clear_log_clicked(GtkButton *button, gpointer user_data);
+
 #endif // PROXYBRIDGE_GUI_H
