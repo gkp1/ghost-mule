@@ -10,15 +10,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include "ProxyBridge.h"
-
-static long safe_strtol(const char *nptr) {
-    if (!nptr) return 0; // Handle NULL
-    char *endptr;
-    long val = strtol(nptr, &endptr, 10);
-    // You could check errno here if needed, but for GUI fields 0 is often a safe fallback or filtered before
-    if (endptr == nptr) return 0; // No digits found
-    return val;
-}
+#include "gui.h"
 
 // --- Global UI Widgets ---
 static GtkWidget *window;
@@ -29,33 +21,6 @@ static GtkTextBuffer *log_buffer;
 static GtkWidget *status_bar;
 static guint status_context_id;
 
-// --- Data Structures for thread-safe UI updates ---
-typedef struct {
-    char *process_name;
-    uint32_t pid;
-    char *dest_ip;
-    uint16_t dest_port;
-    char *proxy_info;
-    char *timestamp;
-} ConnectionData;
-
-typedef struct {
-    char *message;
-} LogData;
-
-typedef struct {
-    GtkWidget *dialog;
-    GtkWidget *ip_entry;
-    GtkWidget *port_entry;
-    GtkWidget *type_combo;
-    GtkWidget *user_entry;
-    GtkWidget *pass_entry;
-    GtkWidget *test_host;
-    GtkWidget *test_port;
-    GtkTextBuffer *output_buffer;
-    GtkWidget *test_btn;
-} ConfigInfo;
-
 // --- Config Globals (Defaults) ---
 static char g_proxy_ip[256] = "";
 static uint16_t g_proxy_port = 0;
@@ -63,21 +28,50 @@ static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
 static char g_proxy_user[256] = "";
 static char g_proxy_pass[256] = "";
 
-typedef struct {
-    uint32_t id;
-    char *process_name;
-    char *target_hosts;
-    char *target_ports;
-    RuleProtocol protocol;
-    RuleAction action;
-    bool enabled;
-    bool selected;
-} RuleData;
-
 static GList *g_rules_list = NULL;
 static GtkWidget *rules_list_box = NULL;
 
 // --- Helper Functions ---
+
+static long safe_strtol(const char *nptr) {
+    if (!nptr) return 0; // Handle NULL
+    char *endptr;
+    long val = strtol(nptr, &endptr, 10);
+    // You could check errno here if needed, but for GUI fields 0 is often a safe fallback or filtered before
+    if (endptr == nptr) return 0; // No digits found
+    return val;
+}
+
+// --- Helper Functions ---
+
+// Helper for quick message dialogs
+static void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    char *msg = g_strdup_vprintf(format, args);
+    va_end(args);
+
+    GtkWidget *dialog = gtk_message_dialog_new(parent,
+                                            GTK_DIALOG_DESTROY_WITH_PARENT | GTK_DIALOG_MODAL,
+                                            type,
+                                            GTK_BUTTONS_OK,
+                                            "%s", msg);
+    gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+    g_free(msg);
+}
+
+// Helper to limit buffer lines
+static void trim_buffer_lines(GtkTextBuffer *buffer, int max_lines) {
+    if (gtk_text_buffer_get_line_count(buffer) > max_lines) {
+        GtkTextIter start, next;
+        gtk_text_buffer_get_start_iter(buffer, &start);
+        next = start;
+        gtk_text_iter_forward_line(&next);
+        gtk_text_buffer_delete(buffer, &start, &next);
+    }
+}
+
 // Forward declaration
 static void refresh_rules_ui();
 
@@ -179,13 +173,7 @@ static gboolean update_log_gui(gpointer user_data) {
     gtk_text_buffer_insert(log_buffer, &end, full_msg, -1);
 
     // Limit to 100 lines to prevent memory growth
-    while (gtk_text_buffer_get_line_count(log_buffer) > 100) {
-        GtkTextIter start, next;
-        gtk_text_buffer_get_start_iter(log_buffer, &start);
-        next = start;
-        gtk_text_iter_forward_line(&next);
-        gtk_text_buffer_delete(log_buffer, &start, &next);
-    }
+    trim_buffer_lines(log_buffer, 100);
 
     free(data->message);
     free(data);
@@ -209,13 +197,7 @@ static gboolean update_connection_gui_append(gpointer user_data) {
         gtk_text_buffer_insert(conn_buffer, &end, line_buffer, -1);
 
         // Limit to 100 lines to prevent memory growth
-        while (gtk_text_buffer_get_line_count(conn_buffer) > 100) {
-            GtkTextIter start, next;
-            gtk_text_buffer_get_start_iter(conn_buffer, &start);
-            next = start;
-            gtk_text_iter_forward_line(&next);
-            gtk_text_buffer_delete(conn_buffer, &start, &next);
-        }
+        trim_buffer_lines(conn_buffer, 100);
     }
 
     free_connection_data(data);
@@ -243,19 +225,6 @@ static void lib_connection_callback(const char *process_name, uint32_t pid, cons
 }
 
 // --- Settings Dialog ---
-
-struct TestRunnerData {
-    char *host;
-    uint16_t port;
-    ConfigInfo *ui_info;
-};
-
-// Better thread communication
-typedef struct {
-    char *result_text;
-    GtkTextBuffer *buffer;
-    GtkWidget *btn;
-} TestResultData;
 
 static gboolean on_test_done(gpointer user_data) {
     TestResultData *data = (TestResultData *)user_data;
@@ -443,24 +412,18 @@ static void on_proxy_configure(GtkWidget *widget, gpointer data) {
         const char *port_text = gtk_entry_get_text(GTK_ENTRY(info.port_entry));
 
         if (!ip_text || strlen(ip_text) == 0) {
-            GtkWidget *err = gtk_message_dialog_new(GTK_WINDOW(info.dialog), GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Host (IP/Domain) cannot be empty.");
-            gtk_dialog_run(GTK_DIALOG(err));
-            gtk_widget_destroy(err);
+            show_message(GTK_WINDOW(info.dialog), GTK_MESSAGE_ERROR, "Host (IP/Domain) cannot be empty.");
             continue;
         }
 
         if (strspn(port_text, "0123456789") != strlen(port_text) || strlen(port_text) == 0) {
-            GtkWidget *err = gtk_message_dialog_new(GTK_WINDOW(info.dialog), GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Port must be a valid number.");
-            gtk_dialog_run(GTK_DIALOG(err));
-            gtk_widget_destroy(err);
+            show_message(GTK_WINDOW(info.dialog), GTK_MESSAGE_ERROR, "Port must be a valid number.");
             continue;
         }
 
         int p = (int)safe_strtol(port_text);
         if (p < 1 || p > 65535) {
-            GtkWidget *err = gtk_message_dialog_new(GTK_WINDOW(info.dialog), GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Port must be between 1 and 65535.");
-             gtk_dialog_run(GTK_DIALOG(err));
-             gtk_widget_destroy(err);
+            show_message(GTK_WINDOW(info.dialog), GTK_MESSAGE_ERROR, "Port must be between 1 and 65535.");
              continue;
         }
 
@@ -783,9 +746,7 @@ static void on_rule_export_clicked(GtkWidget *widget, gpointer data) {
         if (((RuleData *)l->data)->selected) { any_selected = true; break; }
     }
     if (!any_selected) {
-        GtkWidget *msg = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "Please select at least one rule to export.");
-        gtk_dialog_run(GTK_DIALOG(msg));
-        gtk_widget_destroy(msg);
+        show_message(NULL, GTK_MESSAGE_WARNING, "Please select at least one rule to export.");
         return;
     }
 
@@ -830,9 +791,7 @@ static void on_rule_export_clicked(GtkWidget *widget, gpointer data) {
             fprintf(f, "\n]\n");
             fclose(f);
             
-            GtkWidget *msg = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "Rules exported successfully.");
-            gtk_dialog_run(GTK_DIALOG(msg));
-            gtk_widget_destroy(msg);
+            show_message(NULL, GTK_MESSAGE_INFO, "Rules exported successfully.");
         }
         g_free(filename);
     }
@@ -909,9 +868,7 @@ static void on_rule_import_clicked(GtkWidget *widget, gpointer data) {
             
             if (imported > 0) {
                  refresh_rules_ui();
-                 GtkWidget *msg = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "Imported %d rules.", imported);
-                 gtk_dialog_run(GTK_DIALOG(msg));
-                 gtk_widget_destroy(msg);
+                 show_message(NULL, GTK_MESSAGE_INFO, "Imported %d rules.", imported);
             }
         }
         g_free(filename);
@@ -1267,17 +1224,13 @@ static void on_check_update(GtkWidget *widget, gpointer data) {
     g_free(cmd);
 
     if (!result) {
-         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to launch update check: %s", error ? error->message : "Unknown error");
-         gtk_dialog_run(GTK_DIALOG(msg));
-         gtk_widget_destroy(msg);
+         show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Failed to launch update check: %s", error ? error->message : "Unknown error");
          if (error) g_error_free(error);
          return;
     }
 
     if (exit_status != 0 || !standard_output || strlen(standard_output) == 0) {
-         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Update check failed (Exit: %d).", exit_status);
-         gtk_dialog_run(GTK_DIALOG(msg));
-         gtk_widget_destroy(msg);
+         show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed (Exit: %d).", exit_status);
          g_free(standard_output);
          g_free(standard_error);
          return;
@@ -1290,9 +1243,7 @@ static void on_check_update(GtkWidget *widget, gpointer data) {
     g_free(standard_error);
 
     if (!tag_name) {
-         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "Could not parse version info.\nResponse might be rate limited.");
-         gtk_dialog_run(GTK_DIALOG(msg));
-         gtk_widget_destroy(msg);
+         show_message(GTK_WINDOW(window), GTK_MESSAGE_WARNING, "Could not parse version info.\nResponse might be rate limited.");
          return;
     }
     
@@ -1300,9 +1251,7 @@ static void on_check_update(GtkWidget *widget, gpointer data) {
     char *current_tag = g_strdup_printf("v%s", PROXYBRIDGE_VERSION);
     
     if (strcmp(tag_name, current_tag) == 0) {
-         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "You are using the latest version (%s).", PROXYBRIDGE_VERSION);
-         gtk_dialog_run(GTK_DIALOG(msg));
-         gtk_widget_destroy(msg);
+         show_message(GTK_WINDOW(window), GTK_MESSAGE_INFO, "You are using the latest version (%s).", PROXYBRIDGE_VERSION);
     } else {
         GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
                                             GTK_DIALOG_DESTROY_WITH_PARENT,
@@ -1349,8 +1298,7 @@ int main(int argc, char *argv[]) {
         // Can't show GUI dialog easily without GTK init which might fail if no display.
         // Try init, then dialog.
         gtk_init(&argc, &argv); 
-        GtkWidget *dialog = gtk_message_dialog_new(NULL, 0, GTK_MESSAGE_ERROR, GTK_BUTTONS_CLOSE, "ProxyBridge must be run as root (sudo).");
-        gtk_dialog_run(GTK_DIALOG(dialog));
+        show_message(NULL, GTK_MESSAGE_ERROR, "ProxyBridge must be run as root (sudo).");
         return 1;
     }
 
