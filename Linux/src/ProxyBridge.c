@@ -8,8 +8,10 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
+#include <poll.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
@@ -94,7 +96,9 @@ static CONNECTION_INFO *connection_hash_table[CONNECTION_HASH_SIZE] = {NULL};
 static LOGGED_CONNECTION *logged_connections = NULL;
 static PROCESS_RULE *rules_list = NULL;
 static uint32_t g_next_rule_id = 1;
-static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_rwlock_t conn_lock = PTHREAD_RWLOCK_INITIALIZER;   // read-heavy connection hash
+static pthread_mutex_t pid_cache_lock = PTHREAD_MUTEX_INITIALIZER; // PID cache only
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;       // logged connections only
 
 typedef struct {
     int client_socket;
@@ -135,6 +139,7 @@ static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
 static char g_proxy_username[256] = "";
 static char g_proxy_password[256] = "";
 static bool g_dns_via_proxy = true;
+static uint32_t g_proxy_ip_cached = 0; // Cached resolved proxy IP
 static LogCallback g_log_callback = NULL;
 static ConnectionCallback g_connection_callback = NULL;
 
@@ -182,8 +187,7 @@ static bool parse_token_list(const char *list, const char *delimiters, token_mat
     if (list_copy == NULL)
         return false;
 
-    strncpy(list_copy, list, len - 1);
-    list_copy[len - 1] = '\0';
+    memcpy(list_copy, list, len);  // copy including null terminator
     bool matched = false;
     char *saveptr = NULL;
     char *token = strtok_r(list_copy, delimiters, &saveptr);
@@ -260,7 +264,6 @@ static RuleAction check_process_rule(uint32_t src_ip, uint16_t src_port, uint32_
 static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip, uint16_t dest_port);
 static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_port);
 static bool is_connection_tracked(uint16_t src_port);
-static void remove_connection(uint16_t src_port);
 static void cleanup_stale_connections(void);
 static bool is_connection_already_logged(uint32_t pid, uint32_t dest_ip, uint16_t dest_port, RuleAction action);
 static void add_logged_connection(uint32_t pid, uint32_t dest_ip, uint16_t dest_port, RuleAction action);
@@ -271,17 +274,84 @@ static void cache_pid(uint32_t src_ip, uint16_t src_port, uint32_t pid, bool is_
 static void clear_pid_cache(void);
 static void update_has_active_rules(void);
 
-// fast pid lookup using netlink sock_diag
+// Find PID that owns a socket inode by scanning /proc/[pid]/fd/
+// Uses UID hint from netlink to skip non-matching processes
+static uint32_t find_pid_from_inode(unsigned long target_inode, uint32_t uid_hint)
+{
+    // Build the expected link target string once
+    char expected[64];
+    int expected_len = snprintf(expected, sizeof(expected), "socket:[%lu]", target_inode);
+    
+    DIR *proc_dir = opendir("/proc");
+    if (!proc_dir)
+        return 0;
+    
+    uint32_t pid = 0;
+    struct dirent *proc_entry;
+    
+    while ((proc_entry = readdir(proc_dir)) != NULL) {
+        // Skip non-numeric entries (not PID dirs)
+        if (proc_entry->d_type != DT_DIR || !isdigit(proc_entry->d_name[0]))
+            continue;
+        
+        // If we have a UID hint from netlink, skip processes owned by other users
+        // This dramatically reduces the /proc/*/fd scan scope
+        if (uid_hint != (uint32_t)-1) {
+            struct stat proc_stat;
+            char proc_path[280];
+            snprintf(proc_path, sizeof(proc_path), "/proc/%s", proc_entry->d_name);
+            if (stat(proc_path, &proc_stat) == 0 && proc_stat.st_uid != uid_hint)
+                continue;
+        }
+        
+        char fd_path[280];
+        snprintf(fd_path, sizeof(fd_path), "/proc/%s/fd", proc_entry->d_name);
+        DIR *fd_dir = opendir(fd_path);
+        if (!fd_dir)
+            continue;
+        
+        struct dirent *fd_entry;
+        while ((fd_entry = readdir(fd_dir)) != NULL) {
+            if (fd_entry->d_name[0] == '.')
+                continue;
+            
+            char link_path[560];
+            snprintf(link_path, sizeof(link_path), "/proc/%s/fd/%s",
+                    proc_entry->d_name, fd_entry->d_name);
+            
+            char link_target[64];
+            ssize_t link_len = readlink(link_path, link_target, sizeof(link_target) - 1);
+            if (link_len == expected_len) {
+                link_target[link_len] = '\0';
+                if (memcmp(link_target, expected, expected_len) == 0) {
+                    pid = (uint32_t)atoi(proc_entry->d_name);
+                    closedir(fd_dir);
+                    closedir(proc_dir);
+                    return pid;
+                }
+            }
+        }
+        closedir(fd_dir);
+    }
+    closedir(proc_dir);
+    return pid;
+}
+
+// Optimized PID lookup using netlink sock_diag
+// Uses exact netlink query (no DUMP) for TCP, targeted DUMP for UDP
 static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_port, bool is_udp)
 {
     uint32_t cached_pid = get_cached_pid(src_ip, src_port, is_udp);
     if (cached_pid != 0)
         return cached_pid;
 
-    int fd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_SOCK_DIAG);
-    if (fd < 0) {
+    int fd = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_SOCK_DIAG);
+    if (fd < 0)
         return 0;
-    }
+
+    // Set a short timeout to avoid blocking packet processing
+    struct timeval tv = {0, 100000}; // 100ms
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     struct {
         struct nlmsghdr nlh;
@@ -291,10 +361,16 @@ static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_por
     memset(&req, 0, sizeof(req));
     req.nlh.nlmsg_len = sizeof(req);
     req.nlh.nlmsg_type = SOCK_DIAG_BY_FAMILY;
-    req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
     req.r.sdiag_family = AF_INET;
     req.r.sdiag_protocol = is_udp ? IPPROTO_UDP : IPPROTO_TCP;
-    req.r.idiag_states = -1;  // All states (UDP is connectionless, doesn't have TCP states)
+
+    // For UDP: must use DUMP (connectionless sockets don't support exact lookup)
+    // For TCP: use DUMP with state filter for SYN_SENT + ESTABLISHED only
+    req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    if (!is_udp)
+        req.r.idiag_states = (1 << 2) | (1 << 3); // SYN_SENT(2) + ESTABLISHED(3) only
+    else
+        req.r.idiag_states = (uint32_t)-1; // All states for UDP
     req.r.idiag_ext = 0;
 
     struct sockaddr_nl sa;
@@ -308,171 +384,77 @@ static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_por
 
     uint32_t pid = 0;
     unsigned long target_inode = 0;
-    int matches_found = 0;
-    char buf[8192];
+    uint32_t target_uid = (uint32_t)-1;
+    bool found = false;
+    char buf[16384];
     struct iovec iov = {buf, sizeof(buf)};
     struct msghdr msg = {&sa, sizeof(sa), &iov, 1, NULL, 0, 0};
 
     while (1) {
         ssize_t len = recvmsg(fd, &msg, 0);
-        if (len < 0) {
+        if (len <= 0)
             break;
-        }
-        if (len == 0) break;
 
         struct nlmsghdr *h = (struct nlmsghdr *)buf;
-        while (NLMSG_OK(h, len)) {
-            if (h->nlmsg_type == NLMSG_DONE) {
-                goto done;
-            }
-            if (h->nlmsg_type == NLMSG_ERROR) {
-                goto done;
-            }
+        while (NLMSG_OK(h, (size_t)len)) {
+            if (h->nlmsg_type == NLMSG_DONE || h->nlmsg_type == NLMSG_ERROR)
+                goto nl_done;
+
             if (h->nlmsg_type == SOCK_DIAG_BY_FAMILY) {
                 struct inet_diag_msg *r = NLMSG_DATA(h);
-                
-                // match src ip and port
+
+                // Match src IP and port
                 if (r->id.idiag_src[0] == src_ip && ntohs(r->id.idiag_sport) == src_port) {
-                    matches_found++;
                     target_inode = r->idiag_inode;
-                    
-                    // read /proc/net/{tcp,udp} to map inode to pid
-                    char proc_file[64];
-                    snprintf(proc_file, sizeof(proc_file), "/proc/net/%s", is_udp ? "udp" : "tcp");
-                    FILE *fp = fopen(proc_file, "r");
-                    if (fp) {
-                        char line[512];
-                        (void)fgets(line, sizeof(line), fp); // skip header
-                        while (fgets(line, sizeof(line), fp)) {
-                            unsigned long inode;
-                            int uid_val, pid_val;
-                            if (sscanf(line, "%*d: %*X:%*X %*X:%*X %*X %*X:%*X %*X:%*X %*X %d %*d %lu",
-                                      &uid_val, &inode) == 2) {
-                                if (inode == target_inode) {
-                                    // now find PID from /proc/*/fd/* with this inode
-                                    // this is expensive but necessary
-                                    DIR *proc_dir = opendir("/proc");
-                                    if (proc_dir) {
-                                        struct dirent *proc_entry;
-                                        while ((proc_entry = readdir(proc_dir)) != NULL) {
-                                            if (!isdigit(proc_entry->d_name[0])) continue;
-                                            
-                                            char fd_path[256];
-                                            snprintf(fd_path, sizeof(fd_path), "/proc/%s/fd", proc_entry->d_name);
-                                            DIR *fd_dir = opendir(fd_path);
-                                            if (fd_dir) {
-                                                struct dirent *fd_entry;
-                                                while ((fd_entry = readdir(fd_dir)) != NULL) {
-                                                    if (fd_entry->d_name[0] == '.') continue;
-                                                    
-                                                    char link_path[512], link_target[512];
-                                                    snprintf(link_path, sizeof(link_path), "/proc/%s/fd/%s",
-                                                            proc_entry->d_name, fd_entry->d_name);
-                                                    ssize_t link_len = readlink(link_path, link_target, sizeof(link_target)-1);
-                                                    if (link_len > 0) {
-                                                        link_target[link_len] = '\0';
-                                                        char expected[64];
-                                                        snprintf(expected, sizeof(expected), "socket:[%lu]", target_inode);
-                                                        if (strcmp(link_target, expected) == 0) {
-                                                            pid = atoi(proc_entry->d_name);
-                                                            closedir(fd_dir);
-                                                            closedir(proc_dir);
-                                                            fclose(fp);
-                                                            goto done;
-                                                        }
-                                                    }
-                                                }
-                                                closedir(fd_dir);
-                                            }
-                                        }
-                                        closedir(proc_dir);
-                                    }
-                                    fclose(fp);
-                                    goto done;
-                                }
-                            }
-                        }
-                        fclose(fp);
-                    }
-                    goto done;
+                    target_uid = r->idiag_uid; // UID to narrow /proc scan
+                    found = true;
+                    goto nl_done;
                 }
             }
             h = NLMSG_NEXT(h, len);
         }
     }
 
-done:
+nl_done:
     close(fd);
-    
+
+    // If netlink found the socket, find PID from inode
+    // Skip the redundant /proc/net/tcp scan - netlink already gave us the inode
+    if (found && target_inode != 0) {
+        pid = find_pid_from_inode(target_inode, target_uid);
+    }
+
     // Fallback for UDP: scan /proc/net/udp if netlink didn't find the socket
     // This happens when UDP socket uses sendto() without connect()
-    if (matches_found == 0 && is_udp) {
-        
-        // Try both IPv4 and IPv6 (socket might be IPv6 sending IPv4 packets)
+    if (!found && is_udp) {
         const char* udp_files[] = {"/proc/net/udp", "/proc/net/udp6"};
         for (int file_idx = 0; file_idx < 2 && pid == 0; file_idx++) {
             FILE *fp = fopen(udp_files[file_idx], "r");
-            if (fp) {
-                char line[512];
-                (void)fgets(line, sizeof(line), fp); // skip header
-                int entries_scanned = 0;
-                while (fgets(line, sizeof(line), fp)) {
-                    unsigned int local_addr, local_port;
-                    unsigned long inode;
-                    int uid_val;
-                    
-                    // Format: sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
-                    if (sscanf(line, "%*d: %X:%X %*X:%*X %*X %*X:%*X %*X:%*X %*X %d %*d %lu",
-                              &local_addr, &local_port, &uid_val, &inode) == 4) {
-                        entries_scanned++;
-                        
-                        if (local_port == src_port) {
-                        target_inode = inode;
-                        
-                        // Now find PID from /proc/*/fd/* with this inode
-                        DIR *proc_dir = opendir("/proc");
-                        if (proc_dir) {
-                            struct dirent *proc_entry;
-                            while ((proc_entry = readdir(proc_dir)) != NULL && pid == 0) {
-                                if (proc_entry->d_type == DT_DIR && isdigit(proc_entry->d_name[0])) {
-                                    char fd_path[256];
-                                    snprintf(fd_path, sizeof(fd_path), "/proc/%s/fd", proc_entry->d_name);
-                                    DIR *fd_dir = opendir(fd_path);
-                                    if (fd_dir) {
-                                        struct dirent *fd_entry;
-                                        while ((fd_entry = readdir(fd_dir)) != NULL && pid == 0) {
-                                            if (fd_entry->d_type == DT_LNK) {
-                                                char link_path[512];
-                                                snprintf(link_path, sizeof(link_path), "/proc/%s/fd/%s",
-                                                        proc_entry->d_name, fd_entry->d_name);
-                                                char link_target[256];
-                                                ssize_t link_len = readlink(link_path, link_target, sizeof(link_target) - 1);
-                                                if (link_len > 0) {
-                                                    link_target[link_len] = '\0';
-                                                    char expected[64];
-                                                    snprintf(expected, sizeof(expected), "socket:[%lu]", inode);
-                                                    if (strcmp(link_target, expected) == 0) {
-                                                        pid = (uint32_t)atoi(proc_entry->d_name);
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        closedir(fd_dir);
-                                    }
-                                }
-                            }
-                            closedir(proc_dir);
-                        }
+            if (!fp)
+                continue;
+            
+            char line[512];
+            if (!fgets(line, sizeof(line), fp)) { // skip header
+                fclose(fp);
+                continue;
+            }
+            while (fgets(line, sizeof(line), fp)) {
+                unsigned int local_addr, local_port;
+                unsigned long inode;
+                int uid_val;
+                
+                if (sscanf(line, "%*d: %X:%X %*X:%*X %*X %*X:%*X %*X:%*X %*X %d %*d %lu",
+                          &local_addr, &local_port, &uid_val, &inode) == 4) {
+                    if (local_port == src_port && inode != 0) {
+                        pid = find_pid_from_inode(inode, (uint32_t)uid_val);
                         break;
                     }
                 }
             }
             fclose(fp);
         }
-        }
     }
-    
+
     if (pid != 0)
         cache_pid(src_ip, src_port, pid, is_udp);
     return pid;
@@ -923,12 +905,24 @@ static int http_connect(int s, uint32_t dest_ip, uint16_t dest_port)
 
     if (g_proxy_username[0] != '\0')
     {
-        char auth[512];
-        snprintf(auth, sizeof(auth), "%s:%s", g_proxy_username, g_proxy_password);
-        
-        // simple base64 encode - production code should use proper base64
+        // Base64 encode username:password
+        static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        char auth_raw[512];
+        int auth_raw_len = snprintf(auth_raw, sizeof(auth_raw), "%s:%s", g_proxy_username, g_proxy_password);
+        char auth_b64[700];
+        int j = 0;
+        for (int i = 0; i < auth_raw_len; i += 3) {
+            unsigned int n = ((unsigned char)auth_raw[i]) << 16;
+            if (i + 1 < auth_raw_len) n |= ((unsigned char)auth_raw[i + 1]) << 8;
+            if (i + 2 < auth_raw_len) n |= ((unsigned char)auth_raw[i + 2]);
+            auth_b64[j++] = b64[(n >> 18) & 0x3F];
+            auth_b64[j++] = b64[(n >> 12) & 0x3F];
+            auth_b64[j++] = (i + 1 < auth_raw_len) ? b64[(n >> 6) & 0x3F] : '=';
+            auth_b64[j++] = (i + 2 < auth_raw_len) ? b64[n & 0x3F] : '=';
+        }
+        auth_b64[j] = '\0';
         len += snprintf(buf + len, sizeof(buf) - len,
-            "Proxy-Authorization: Basic %s\r\n", auth);
+            "Proxy-Authorization: Basic %s\r\n", auth_b64);
     }
 
     len += snprintf(buf + len, sizeof(buf) - len, "\r\n");
@@ -978,15 +972,21 @@ static void* connection_handler(void *arg)
 
     free(config);
 
-    // Connect to proxy
-    proxy_ip = resolve_hostname(g_proxy_host);
+    // Use cached proxy IP (resolved once at config time)
+    proxy_ip = g_proxy_ip_cached;
     if (proxy_ip == 0)
     {
-        close(client_sock);
-        return NULL;
+        // Try resolving again as fallback
+        proxy_ip = resolve_hostname(g_proxy_host);
+        if (proxy_ip == 0)
+        {
+            close(client_sock);
+            return NULL;
+        }
+        g_proxy_ip_cached = proxy_ip;
     }
 
-    proxy_sock = socket(AF_INET, SOCK_STREAM, 0);
+    proxy_sock = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (proxy_sock < 0)
     {
         close(client_sock);
@@ -1046,56 +1046,49 @@ static void* connection_handler(void *arg)
     return NULL;
 }
 
-// Windows-style transfer handler - uses select() to monitor both sockets
+// Bidirectional transfer handler using poll() for efficiency
 static void* transfer_handler(void *arg)
 {
     transfer_config_t *config = (transfer_config_t *)arg;
     int sock1 = config->from_socket;  // client socket
     int sock2 = config->to_socket;    // proxy socket
-    char buf[131072];  // 128KB buffer
-    int len;
+    char buf[262144];  // 256KB buffer for throughput
+    ssize_t len;
 
     free(config);
 
-    // Monitor BOTH sockets in one thread (like Windows)
+    struct pollfd fds[2];
+    fds[0].fd = sock1;
+    fds[0].events = POLLIN;
+    fds[1].fd = sock2;
+    fds[1].events = POLLIN;
+
     while (1)
     {
-        fd_set readfds;
-        struct timeval timeout;
-
-        FD_ZERO(&readfds);
-        FD_SET(sock1, &readfds);  // client
-        FD_SET(sock2, &readfds);  // proxy
-
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 50000;  // 50ms
-
-        int ready = select(FD_SETSIZE, &readfds, NULL, NULL, &timeout);
+        int ready = poll(fds, 2, 30000); // 30s timeout
 
         if (ready < 0)
             break;
 
         if (ready == 0)
-            continue;
+            continue; // timeout, check if still running
 
         // Check client to proxy
-        if (FD_ISSET(sock1, &readfds))
+        if (fds[0].revents & (POLLIN | POLLHUP | POLLERR))
         {
             len = recv(sock1, buf, sizeof(buf), 0);
             if (len <= 0)
                 break;
-
             if (send_all(sock2, buf, len) < 0)
                 break;
         }
 
         // Check proxy to client
-        if (FD_ISSET(sock2, &readfds))
+        if (fds[1].revents & (POLLIN | POLLHUP | POLLERR))
         {
             len = recv(sock2, buf, sizeof(buf), 0);
             if (len <= 0)
                 break;
-
             if (send_all(sock1, buf, len) < 0)
                 break;
         }
@@ -1438,7 +1431,7 @@ static void* udp_relay_server(void *arg)
 
             // Find the client that sent a packet to this destination
             // Iterate through hash table to find matching dest_ip:dest_port
-            pthread_mutex_lock(&lock);
+            pthread_rwlock_rdlock(&conn_lock);
             
             struct sockaddr_in client_addr;
             bool found_client = false;
@@ -1465,7 +1458,7 @@ static void* udp_relay_server(void *arg)
                     break;
             }
             
-            pthread_mutex_unlock(&lock);
+            pthread_rwlock_unlock(&conn_lock);
             
             if (found_client)
             {
@@ -1555,7 +1548,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
                     char dest_ip_str[32];
                     format_ip_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
 
-                    char proxy_info[128];
+                    char proxy_info[300];
                     if (action == RULE_ACTION_PROXY)
                     {
                         snprintf(proxy_info, sizeof(proxy_info), "proxy %s://%s:%d tcp",
@@ -1625,14 +1618,6 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         // UDP proxy only works with SOCKS5, not HTTP
         if (action == RULE_ACTION_PROXY && g_proxy_type != PROXY_TYPE_SOCKS5)
             action = RULE_ACTION_DIRECT;
-        
-        // UDP proxy only works with SOCKS5, not HTTP
-        if (action == RULE_ACTION_PROXY && g_proxy_type != PROXY_TYPE_SOCKS5)
-            action = RULE_ACTION_DIRECT;
-        
-        // UDP proxy only works with SOCKS5, not HTTP
-        if (action == RULE_ACTION_PROXY && g_proxy_type != PROXY_TYPE_SOCKS5)
-            action = RULE_ACTION_DIRECT;
 
         // log (skip our own process, log even without PID for ephemeral UDP sockets)
         if (g_connection_callback != NULL && pid != g_current_process_id)
@@ -1655,7 +1640,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
                     char dest_ip_str[32];
                     format_ip_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
 
-                    char proxy_info[128];
+                    char proxy_info[300];
                     if (action == RULE_ACTION_PROXY)
                     {
                         snprintf(proxy_info, sizeof(proxy_info), "proxy socks5://%s:%d udp",
@@ -1723,7 +1708,7 @@ static inline uint32_t connection_hash(uint16_t port)
 static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip, uint16_t dest_port)
 {
     uint32_t hash = connection_hash(src_port);
-    pthread_mutex_lock(&lock);
+    pthread_rwlock_wrlock(&conn_lock);
 
     CONNECTION_INFO *conn = connection_hash_table[hash];
     while (conn != NULL)
@@ -1735,7 +1720,7 @@ static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip,
             conn->src_ip = src_ip;
             conn->is_tracked = true;
             conn->last_activity = get_monotonic_ms();
-            pthread_mutex_unlock(&lock);
+            pthread_rwlock_unlock(&conn_lock);
             return;
         }
         conn = conn->next;
@@ -1754,13 +1739,13 @@ static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip,
         connection_hash_table[hash] = new_conn;
     }
 
-    pthread_mutex_unlock(&lock);
+    pthread_rwlock_unlock(&conn_lock);
 }
 
 static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_port)
 {
     uint32_t hash = connection_hash(src_port);
-    pthread_mutex_lock(&lock);
+    pthread_rwlock_rdlock(&conn_lock);
 
     CONNECTION_INFO *conn = connection_hash_table[hash];
     while (conn != NULL)
@@ -1769,41 +1754,41 @@ static bool get_connection(uint16_t src_port, uint32_t *dest_ip, uint16_t *dest_
         {
             *dest_ip = conn->orig_dest_ip;
             *dest_port = conn->orig_dest_port;
-            conn->last_activity = get_monotonic_ms();
-            pthread_mutex_unlock(&lock);
+            conn->last_activity = get_monotonic_ms(); // benign race on timestamp
+            pthread_rwlock_unlock(&conn_lock);
             return true;
         }
         conn = conn->next;
     }
 
-    pthread_mutex_unlock(&lock);
+    pthread_rwlock_unlock(&conn_lock);
     return false;
 }
 
 static bool is_connection_tracked(uint16_t src_port)
 {
     uint32_t hash = connection_hash(src_port);
-    pthread_mutex_lock(&lock);
+    pthread_rwlock_rdlock(&conn_lock);
 
     CONNECTION_INFO *conn = connection_hash_table[hash];
     while (conn != NULL)
     {
         if (conn->src_port == src_port && conn->is_tracked)
         {
-            pthread_mutex_unlock(&lock);
+            pthread_rwlock_unlock(&conn_lock);
             return true;
         }
         conn = conn->next;
     }
 
-    pthread_mutex_unlock(&lock);
+    pthread_rwlock_unlock(&conn_lock);
     return false;
 }
 
-static void remove_connection(uint16_t src_port)
+static void __attribute__((unused)) remove_connection(uint16_t src_port)
 {
     uint32_t hash = connection_hash(src_port);
-    pthread_mutex_lock(&lock);
+    pthread_rwlock_wrlock(&conn_lock);
 
     CONNECTION_INFO **conn_ptr = &connection_hash_table[hash];
     while (*conn_ptr != NULL)
@@ -1813,51 +1798,46 @@ static void remove_connection(uint16_t src_port)
             CONNECTION_INFO *to_free = *conn_ptr;
             *conn_ptr = (*conn_ptr)->next;
             free(to_free);
-            pthread_mutex_unlock(&lock);
+            pthread_rwlock_unlock(&conn_lock);
             return;
         }
         conn_ptr = &(*conn_ptr)->next;
     }
 
-    pthread_mutex_unlock(&lock);
+    pthread_rwlock_unlock(&conn_lock);
 }
 
 static void cleanup_stale_connections(void)
 {
     uint64_t now = get_monotonic_ms();
-    int removed = 0;
 
-    // Process each hash bucket with minimal lock time
+    // Cleanup connection hash table
     for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
     {
-        pthread_mutex_lock(&lock);
+        pthread_rwlock_wrlock(&conn_lock);
         CONNECTION_INFO **conn_ptr = &connection_hash_table[i];
 
         while (*conn_ptr != NULL)
         {
-            if (now - (*conn_ptr)->last_activity > 60000)  // 60 sec timeout (same as Windows)
+            if (now - (*conn_ptr)->last_activity > 60000)  // 60 sec timeout
             {
                 CONNECTION_INFO *to_free = *conn_ptr;
                 *conn_ptr = (*conn_ptr)->next;
-                pthread_mutex_unlock(&lock);
-                free(to_free);  // Free outside lock
-                removed++;
-                pthread_mutex_lock(&lock);
+                free(to_free);
             }
             else
             {
                 conn_ptr = &(*conn_ptr)->next;
             }
         }
-        pthread_mutex_unlock(&lock);
+        pthread_rwlock_unlock(&conn_lock);
     }
 
-    // Cleanup PID cache
+    // Cleanup PID cache (separate lock - no contention with connection lookups)
     uint64_t now_cache = get_monotonic_ms();
-    int cache_removed = 0;
     for (int i = 0; i < PID_CACHE_SIZE; i++)
     {
-        pthread_mutex_lock(&lock);
+        pthread_mutex_lock(&pid_cache_lock);
         PID_CACHE_ENTRY **entry_ptr = &pid_cache[i];
         while (*entry_ptr != NULL)
         {
@@ -1865,21 +1845,18 @@ static void cleanup_stale_connections(void)
             {
                 PID_CACHE_ENTRY *to_free = *entry_ptr;
                 *entry_ptr = (*entry_ptr)->next;
-                pthread_mutex_unlock(&lock);
-                free(to_free);  // Free outside lock
-                cache_removed++;
-                pthread_mutex_lock(&lock);
+                free(to_free);
             }
             else
             {
                 entry_ptr = &(*entry_ptr)->next;
             }
         }
-        pthread_mutex_unlock(&lock);
+        pthread_mutex_unlock(&pid_cache_lock);
     }
 
-    // Keep only last 100 logged connections for memory efficiency
-    pthread_mutex_lock(&lock);
+    // Keep only last 100 logged connections
+    pthread_mutex_lock(&log_lock);
     int logged_count = 0;
     LOGGED_CONNECTION *temp = logged_connections;
     while (temp != NULL)
@@ -1907,12 +1884,12 @@ static void cleanup_stale_connections(void)
             }
         }
     }
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&log_lock);
 }
 
 static bool is_connection_already_logged(uint32_t pid, uint32_t dest_ip, uint16_t dest_port, RuleAction action)
 {
-    pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&log_lock);
 
     LOGGED_CONNECTION *logged = logged_connections;
     while (logged != NULL)
@@ -1920,19 +1897,19 @@ static bool is_connection_already_logged(uint32_t pid, uint32_t dest_ip, uint16_
         if (logged->pid == pid && logged->dest_ip == dest_ip && 
             logged->dest_port == dest_port && logged->action == action)
         {
-            pthread_mutex_unlock(&lock);
+            pthread_mutex_unlock(&log_lock);
             return true;
         }
         logged = logged->next;
     }
 
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&log_lock);
     return false;
 }
 
 static void add_logged_connection(uint32_t pid, uint32_t dest_ip, uint16_t dest_port, RuleAction action)
 {
-    pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&log_lock);
 
     // keep only last 100 entries to avoid memory growth
     int count = 0;
@@ -1956,14 +1933,13 @@ static void add_logged_connection(uint32_t pid, uint32_t dest_ip, uint16_t dest_
             LOGGED_CONNECTION *to_free_list = temp->next;
             temp->next = NULL;
 
-            pthread_mutex_unlock(&lock);
+            // Free excess entries (still under log_lock, but this is rare)
             while (to_free_list != NULL)
             {
                 LOGGED_CONNECTION *next = to_free_list->next;
                 free(to_free_list);
                 to_free_list = next;
             }
-            pthread_mutex_lock(&lock);
         }
     }
 
@@ -1978,12 +1954,12 @@ static void add_logged_connection(uint32_t pid, uint32_t dest_ip, uint16_t dest_
         logged_connections = logged;
     }
 
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&log_lock);
 }
 
 static void clear_logged_connections(void)
 {
-    pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&log_lock);
 
     while (logged_connections != NULL)
     {
@@ -1992,7 +1968,7 @@ static void clear_logged_connections(void)
         free(to_free);
     }
 
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&log_lock);
 }
 
 static uint32_t pid_cache_hash(uint32_t src_ip, uint16_t src_port, bool is_udp)
@@ -2007,7 +1983,7 @@ static uint32_t get_cached_pid(uint32_t src_ip, uint16_t src_port, bool is_udp)
     uint64_t current_time = get_monotonic_ms();
     uint32_t pid = 0;
 
-    pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&pid_cache_lock);
 
     PID_CACHE_ENTRY *entry = pid_cache[hash];
     while (entry != NULL)
@@ -2029,7 +2005,7 @@ static uint32_t get_cached_pid(uint32_t src_ip, uint16_t src_port, bool is_udp)
         entry = entry->next;
     }
 
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&pid_cache_lock);
     return pid;
 }
 
@@ -2038,7 +2014,7 @@ static void cache_pid(uint32_t src_ip, uint16_t src_port, uint32_t pid, bool is_
     uint32_t hash = pid_cache_hash(src_ip, src_port, is_udp);
     uint64_t current_time = get_monotonic_ms();
 
-    pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&pid_cache_lock);
 
     PID_CACHE_ENTRY *entry = pid_cache[hash];
     while (entry != NULL)
@@ -2049,7 +2025,7 @@ static void cache_pid(uint32_t src_ip, uint16_t src_port, uint32_t pid, bool is_
         {
             entry->pid = pid;
             entry->timestamp = current_time;
-            pthread_mutex_unlock(&lock);
+            pthread_mutex_unlock(&pid_cache_lock);
             return;
         }
         entry = entry->next;
@@ -2067,12 +2043,12 @@ static void cache_pid(uint32_t src_ip, uint16_t src_port, uint32_t pid, bool is_
         pid_cache[hash] = new_entry;
     }
 
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&pid_cache_lock);
 }
 
 static void clear_pid_cache(void)
 {
-    pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&pid_cache_lock);
 
     for (int i = 0; i < PID_CACHE_SIZE; i++)
     {
@@ -2084,7 +2060,7 @@ static void clear_pid_cache(void)
         }
     }
 
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&pid_cache_lock);
 }
 
 static void* cleanup_worker(void *arg)
@@ -2302,7 +2278,8 @@ bool ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, uint16_t p
     if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
         return false;
 
-    if (resolve_hostname(proxy_ip) == 0)
+    g_proxy_ip_cached = resolve_hostname(proxy_ip);
+    if (g_proxy_ip_cached == 0)
         return false;
 
     strncpy(g_proxy_host, proxy_ip, sizeof(g_proxy_host) - 1);
@@ -2531,7 +2508,7 @@ bool ProxyBridge_Stop(void)
     }
 
     // Free all connections in hash table
-    pthread_mutex_lock(&lock);
+    pthread_rwlock_wrlock(&conn_lock);
     for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
     {
         while (connection_hash_table[i] != NULL)
@@ -2541,7 +2518,7 @@ bool ProxyBridge_Stop(void)
             free(to_free);
         }
     }
-    pthread_mutex_unlock(&lock);
+    pthread_rwlock_unlock(&conn_lock);
 
     clear_logged_connections();
     clear_pid_cache();
@@ -2554,7 +2531,6 @@ int ProxyBridge_TestConnection(const char* target_host, uint16_t target_port, ch
 {
     int test_sock = -1;
     struct sockaddr_in proxy_addr;
-    struct hostent* host_info;
     uint32_t target_ip;
     int ret = -1;
     char temp_buffer[512];
@@ -2578,14 +2554,20 @@ int ProxyBridge_TestConnection(const char* target_host, uint16_t target_port, ch
     strncpy(result_buffer, temp_buffer, buffer_size - 1);
     result_buffer[buffer_size - 1] = '\0';
 
-    host_info = gethostbyname(target_host);
-    if (host_info == NULL)
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    int gai_ret = getaddrinfo(target_host, NULL, &hints, &res);
+    if (gai_ret != 0)
     {
-        snprintf(temp_buffer, sizeof(temp_buffer), "error failed to resolve hostname %s\n", target_host);
+        snprintf(temp_buffer, sizeof(temp_buffer), "error failed to resolve hostname %s: %s\n",
+                target_host, gai_strerror(gai_ret));
         strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
         return -1;
     }
-    target_ip = *(uint32_t*)host_info->h_addr_list[0];
+    target_ip = ((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
+    freeaddrinfo(res);
 
     snprintf(temp_buffer, sizeof(temp_buffer), "resolved %s to %d.%d.%d.%d\n",
         target_host,
@@ -2721,9 +2703,9 @@ static void library_cleanup(void)
     {
         // Even if not running, ensure iptables rules are removed
         // This handles cases where the app crashed before calling Stop
-        system("iptables -t mangle -D OUTPUT -p tcp -j NFQUEUE --queue-num 0 2>/dev/null");
-        system("iptables -t mangle -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null");
-        system("iptables -t nat -D OUTPUT -p tcp -m mark --mark 1 -j REDIRECT --to-port 34010 2>/dev/null");
-        system("iptables -t nat -D OUTPUT -p udp -m mark --mark 2 -j REDIRECT --to-port 34011 2>/dev/null");
+        (void)!system("iptables -t mangle -D OUTPUT -p tcp -j NFQUEUE --queue-num 0 2>/dev/null");
+        (void)!system("iptables -t mangle -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null");
+        (void)!system("iptables -t nat -D OUTPUT -p tcp -m mark --mark 1 -j REDIRECT --to-port 34010 2>/dev/null");
+        (void)!system("iptables -t nat -D OUTPUT -p udp -m mark --mark 2 -j REDIRECT --to-port 34011 2>/dev/null");
     }
 }

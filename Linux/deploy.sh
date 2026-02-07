@@ -37,31 +37,52 @@ install_dependencies() {
     echo ""
     echo "Checking and installing dependencies..."
     
-    case "$DISTRO" in
-        ubuntu|debian)
+    # Normalize distro name using ID_LIKE fallback
+    local distro_family="$DISTRO"
+    if [ -n "$DISTRO_LIKE" ]; then
+        case "$DISTRO_LIKE" in
+            *ubuntu*|*debian*) distro_family="debian" ;;
+            *fedora*) distro_family="fedora" ;;
+            *rhel*|*centos*) distro_family="rhel" ;;
+            *arch*) distro_family="arch" ;;
+            *suse*) distro_family="opensuse" ;;
+        esac
+    fi
+    
+    case "$distro_family" in
+        ubuntu|debian|linuxmint|pop|elementary|zorin|kali|raspbian|mx|antix|deepin|lmde)
             echo "Using apt package manager..."
             apt-get update -qq
-            apt-get install -y libnetfilter-queue1 libnetfilter-queue-dev libnfnetlink0 iptables
+            apt-get install -y libnetfilter-queue1 libnfnetlink0 iptables
             ;;
         fedora)
             echo "Using dnf package manager..."
-            dnf install -y libnetfilter_queue libnetfilter_queue-devel libnfnetlink iptables
+            dnf install -y libnetfilter_queue libnfnetlink iptables
             ;;
         rhel|centos|rocky|almalinux)
             echo "Using yum package manager..."
-            yum install -y libnetfilter_queue libnetfilter_queue-devel libnfnetlink iptables
+            yum install -y libnetfilter_queue libnfnetlink iptables
             ;;
-        arch|manjaro)
+        arch|manjaro|endeavouros|garuda)
             echo "Using pacman package manager..."
             pacman -Sy --noconfirm libnetfilter_queue libnfnetlink iptables
             ;;
         opensuse*|sles)
             echo "Using zypper package manager..."
-            zypper install -y libnetfilter_queue1 libnetfilter_queue-devel libnfnetlink0 iptables
+            zypper install -y libnetfilter_queue1 libnfnetlink0 iptables
+            ;;
+        void)
+            echo "Using xbps package manager..."
+            xbps-install -Sy libnetfilter_queue libnfnetlink iptables
             ;;
         *)
-            echo "WARNING: Unknown distribution '$DISTRO'"
-            echo "Please manually install: libnetfilter-queue, libnfnetlink, iptables"
+            echo "WARNING: Unknown distribution '$DISTRO' (family: '$DISTRO_LIKE')"
+            echo ""
+            echo "Please manually install the following packages:"
+            echo "  Debian/Ubuntu: sudo apt install libnetfilter-queue1 libnfnetlink0 iptables"
+            echo "  Fedora:        sudo dnf install libnetfilter_queue libnfnetlink iptables"
+            echo "  Arch:          sudo pacman -S libnetfilter_queue libnfnetlink iptables"
+            echo ""
             read -p "Continue anyway? (y/n) " -n 1 -r
             echo
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
