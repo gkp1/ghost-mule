@@ -13,9 +13,6 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include "ProxyBridge.h"
-
-// --- Data Structures ---
-
 typedef struct {
     char *process_name;
     uint32_t pid;
@@ -53,7 +50,6 @@ typedef struct {
     bool selected;
 } RuleData;
 
-// --- Thread Communication ---
 struct TestRunnerData {
     char *host;
     uint16_t port;
@@ -66,7 +62,6 @@ typedef struct {
     GtkWidget *btn;
 } TestResultData;
 
-// --- Globals (External) ---
 extern GtkWidget *window;
 extern GtkTextBuffer *conn_buffer;
 extern GtkTextBuffer *log_buffer;
@@ -81,9 +76,6 @@ extern char g_proxy_pass[256];
 
 extern GList *g_rules_list;
 
-// --- Function Prototypes ---
-
-// Utils
 long safe_strtol(const char *nptr);
 void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...);
 void trim_buffer_lines(GtkTextBuffer *buffer, int max_lines);
@@ -92,10 +84,10 @@ char *escape_json_string(const char *src);
 char *extract_sub_json_str(const char *json, const char *key);
 bool extract_sub_json_bool(const char *json, const char *key);
 
-// Settings
+// settings
 void on_proxy_configure(GtkWidget *widget, gpointer data);
 
-// Rules
+// rules section
 void on_proxy_rules_clicked(GtkWidget *widget, gpointer data);
 
 // Logs
@@ -106,4 +98,4 @@ void on_search_log_changed(GtkSearchEntry *entry, gpointer user_data);
 void on_clear_conn_clicked(GtkButton *button, gpointer user_data);
 void on_clear_log_clicked(GtkButton *button, gpointer user_data);
 
-#endif // PROXYBRIDGE_GUI_H
+#endif

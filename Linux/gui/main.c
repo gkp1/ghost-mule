@@ -1,6 +1,6 @@
 #include "gui.h"
 
-// --- Global UI Widgets ---
+// ui widgets
 GtkWidget *window;
 GtkTextView *conn_view;
 GtkTextBuffer *conn_buffer;
@@ -9,7 +9,7 @@ GtkTextBuffer *log_buffer;
 GtkWidget *status_bar;
 guint status_context_id;
 
-// --- Config Globals (Defaults) ---
+// default config
 char g_proxy_ip[256] = "";
 uint16_t g_proxy_port = 0;
 ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
@@ -132,7 +132,7 @@ int main(int argc, char *argv[]) {
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_container_add(GTK_CONTAINER(window), vbox);
 
-    // Menu
+    // menu setup
     GtkWidget *menubar = gtk_menu_bar_new();
     GtkWidget *proxy_menu_item = gtk_menu_item_new_with_label("Proxy");
     GtkWidget *proxy_menu = gtk_menu_new();
@@ -176,11 +176,11 @@ int main(int argc, char *argv[]) {
     gtk_menu_shell_append(GTK_MENU_SHELL(menubar), about_menu_item);
     gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
 
-    // Tabs
+    // tabs
     GtkWidget *notebook = gtk_notebook_new();
     gtk_box_pack_start(GTK_BOX(vbox), notebook, TRUE, TRUE, 0);
 
-    // Tab 1: Connections
+    // active connections tab
     GtkWidget *conn_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     gtk_container_set_border_width(GTK_CONTAINER(conn_vbox), 5);
     GtkWidget *conn_toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
@@ -202,7 +202,7 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(conn_vbox), scrolled_window, TRUE, TRUE, 0);
     gtk_notebook_append_page(GTK_NOTEBOOK(notebook), conn_vbox, gtk_label_new("Connections"));
 
-    // Tab 2: Logs
+    // logs tab
     GtkWidget *log_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     gtk_container_set_border_width(GTK_CONTAINER(log_vbox), 5);
     GtkWidget *log_toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
@@ -224,12 +224,12 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(log_vbox), log_scroll, TRUE, TRUE, 0);
     gtk_notebook_append_page(GTK_NOTEBOOK(notebook), log_vbox, gtk_label_new("Activity Logs"));
 
-    // Status Bar
+    // status bar
     status_bar = gtk_statusbar_new();
     status_context_id = gtk_statusbar_get_context_id(GTK_STATUSBAR(status_bar), "Status");
     gtk_box_pack_start(GTK_BOX(vbox), status_bar, FALSE, FALSE, 0);
 
-    // Initial Config
+    // start it up
     ProxyBridge_SetLogCallback(lib_log_callback);
     ProxyBridge_SetConnectionCallback(lib_connection_callback);
     ProxyBridge_SetTrafficLoggingEnabled(true);

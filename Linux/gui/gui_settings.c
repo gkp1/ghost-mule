@@ -1,6 +1,6 @@
 #include "gui.h"
 
-// --- Settings Dialog ---
+// settings view logic
 
 static gboolean on_test_done(gpointer user_data) {
     TestResultData *data = (TestResultData *)user_data;
@@ -18,7 +18,7 @@ static gpointer run_test_thread(gpointer user_data) {
     char *buffer = malloc(4096);
     memset(buffer, 0, 4096);
     
-    // Check callback if needed, but TestConnection usually returns result in buffer
+    // run the test
     ProxyBridge_TestConnection(req->host, req->port, buffer, 4096);
     
     TestResultData *res = malloc(sizeof(TestResultData));
@@ -36,7 +36,7 @@ static gpointer run_test_thread(gpointer user_data) {
 static void on_start_test_clicked(GtkWidget *widget, gpointer data) {
     ConfigInfo *info = (ConfigInfo *)data;
     
-    // 1. Validate Proxy Config
+    // validate inputs
     const char *ip_text = gtk_entry_get_text(GTK_ENTRY(info->ip_entry));
     const char *port_text = gtk_entry_get_text(GTK_ENTRY(info->port_entry));
     
@@ -45,7 +45,7 @@ static void on_start_test_clicked(GtkWidget *widget, gpointer data) {
         return;
     }
     
-    // 2. Set Proxy Config
+    // save config
     ProxyType type = (gtk_combo_box_get_active(GTK_COMBO_BOX(info->type_combo)) == 0) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
     int port = (int)safe_strtol(port_text);
     const char *user = gtk_entry_get_text(GTK_ENTRY(info->user_entry));
@@ -53,7 +53,7 @@ static void on_start_test_clicked(GtkWidget *widget, gpointer data) {
     
     ProxyBridge_SetProxyConfig(type, ip_text, port, user, pass);
     
-    // 3. Get Test Target
+    // get target
     const char *t_host = gtk_entry_get_text(GTK_ENTRY(info->test_host));
     const char *t_port_s = gtk_entry_get_text(GTK_ENTRY(info->test_port));
     
@@ -61,11 +61,11 @@ static void on_start_test_clicked(GtkWidget *widget, gpointer data) {
     int t_port = (int)safe_strtol(t_port_s);
     if (t_port <= 0) t_port = 80;
     
-    // 4. Update UI
+    // update gui
     gtk_text_buffer_set_text(info->output_buffer, "Testing connection... Please wait...", -1);
     gtk_widget_set_sensitive(info->test_btn, FALSE);
     
-    // 5. Run Thread
+    // start thread
     struct TestRunnerData *req = malloc(sizeof(struct TestRunnerData));
     req->host = strdup(t_host);
     req->port = t_port;
@@ -87,7 +87,7 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
                                          "Cancel", GTK_RESPONSE_CANCEL,
                                          "Save", GTK_RESPONSE_ACCEPT,
                                          NULL);
-    // Increase width for log
+    // make it wider
     gtk_window_set_default_size(GTK_WINDOW(info.dialog), 600, 500);
 
     content_area = gtk_dialog_get_content_area(GTK_DIALOG(info.dialog));
@@ -97,22 +97,22 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
     gtk_container_set_border_width(GTK_CONTAINER(grid), 10);
     gtk_box_pack_start(GTK_BOX(content_area), grid, TRUE, TRUE, 0);
 
-    // Type
+    // type selection
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Type:"), 0, 0, 1, 1);
     info.type_combo = gtk_combo_box_text_new();
     gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(info.type_combo), "HTTP");
     gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(info.type_combo), "SOCKS5");
     gtk_combo_box_set_active(GTK_COMBO_BOX(info.type_combo), g_proxy_type == PROXY_TYPE_HTTP ? 0 : 1);
-    gtk_grid_attach(GTK_GRID(grid), info.type_combo, 1, 0, 3, 1); // Span 3
+    gtk_grid_attach(GTK_GRID(grid), info.type_combo, 1, 0, 3, 1); 
 
-    // IP
+    // ip address
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Host:"), 0, 1, 1, 1);
     info.ip_entry = gtk_entry_new();
     gtk_entry_set_text(GTK_ENTRY(info.ip_entry), g_proxy_ip);
     gtk_widget_set_hexpand(info.ip_entry, TRUE);
     gtk_grid_attach(GTK_GRID(grid), info.ip_entry, 1, 1, 3, 1);
 
-    // Port
+    // port number
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Port:"), 0, 2, 1, 1);
     info.port_entry = gtk_entry_new();
     if (g_proxy_port != 0) {
@@ -122,20 +122,20 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
     }
     gtk_grid_attach(GTK_GRID(grid), info.port_entry, 1, 2, 3, 1);
 
-    // User
+    // username
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Username:"), 0, 3, 1, 1);
     info.user_entry = gtk_entry_new();
     gtk_entry_set_text(GTK_ENTRY(info.user_entry), g_proxy_user);
     gtk_grid_attach(GTK_GRID(grid), info.user_entry, 1, 3, 3, 1);
 
-    // Pass
+    // password
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Password:"), 0, 4, 1, 1);
     info.pass_entry = gtk_entry_new();
     gtk_entry_set_visibility(GTK_ENTRY(info.pass_entry), FALSE);
     gtk_entry_set_text(GTK_ENTRY(info.pass_entry), g_proxy_pass);
     gtk_grid_attach(GTK_GRID(grid), info.pass_entry, 1, 4, 3, 1);
 
-    // --- Test Section ---
+    // test connection section
     gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, 5, 4, 1);
     
     GtkWidget *test_label = gtk_label_new("<b>Test Connection</b>");
@@ -143,7 +143,7 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
     gtk_widget_set_halign(test_label, GTK_ALIGN_START);
     gtk_grid_attach(GTK_GRID(grid), test_label, 0, 6, 4, 1);
 
-    // Target Host
+    // target host
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Target:"), 0, 7, 1, 1);
     info.test_host = gtk_entry_new();
     gtk_entry_set_text(GTK_ENTRY(info.test_host), "google.com");

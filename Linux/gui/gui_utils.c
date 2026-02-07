@@ -1,15 +1,15 @@
 #include "gui.h"
 
-// Helper for safe integer conversion
+// safer way to turn string to int
 long safe_strtol(const char *nptr) {
-    if (!nptr) return 0; // Handle NULL
+    if (!nptr) return 0; // null check
     char *endptr;
     long val = strtol(nptr, &endptr, 10);
-    if (endptr == nptr) return 0; // No digits found
+    if (endptr == nptr) return 0; // bad input
     return val;
 }
 
-// Helper for quick message dialogs
+// show simple popup
 void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...) {
     va_list args;
     va_start(args, format);
@@ -26,7 +26,7 @@ void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ..
     g_free(msg);
 }
 
-// Helper to limit buffer lines
+// limit log size so it doesnt eat ram
 void trim_buffer_lines(GtkTextBuffer *buffer, int max_lines) {
     if (gtk_text_buffer_get_line_count(buffer) > max_lines) {
         GtkTextIter start, next;
@@ -47,7 +47,7 @@ char* get_current_time_str() {
     return buffer;
 }
 
-// --- JSON Helpers ---
+// json stuff
 char *escape_json_string(const char *src) {
     if (!src) return strdup("");
     GString *str = g_string_new("");
@@ -60,7 +60,7 @@ char *escape_json_string(const char *src) {
     return g_string_free(str, FALSE);
 }
 
-// Very basic JSON parser for valid input
+// basic parser, good enough for valid inputs
 char *extract_sub_json_str(const char *json, const char *key) {
     char search_key[256];
     snprintf(search_key, sizeof(search_key), "\"%s\"", key);
@@ -83,7 +83,7 @@ bool extract_sub_json_bool(const char *json, const char *key) {
     if (!k) return false;
     char *colon = strchr(k, ':');
     if (!colon) return false;
-    // Skip spaces
+    // skip whitespace
     char *v = colon + 1;
     while(*v == ' ' || *v == '\t') v++;
     if (strncmp(v, "true", 4) == 0) return true;
