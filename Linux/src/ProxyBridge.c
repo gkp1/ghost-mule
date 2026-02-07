@@ -185,7 +185,16 @@ static bool parse_token_list(const char *list, const char *delimiters, token_mat
     while (token != NULL)
     {
         token = skip_whitespace(token);
-        if (match_func(token, match_data))
+
+        // Trim trailing whitespace
+        size_t tlen = strlen(token);
+        while (tlen > 0 && (token[tlen - 1] == ' ' || token[tlen - 1] == '\t' || token[tlen-1] == '\r' || token[tlen-1] == '\n'))
+        {
+            token[tlen - 1] = '\0';
+            tlen--;
+        }
+
+        if (tlen > 0 && match_func(token, match_data))
         {
             matched = true;
             break;
@@ -518,9 +527,21 @@ static bool match_ip_pattern(const char *pattern, uint32_t ip)
     {
         if (strcmp(pattern_octets[i], "*") == 0)
             continue;
-        int pattern_val = atoi(pattern_octets[i]);
-        if (pattern_val != ip_octets[i])
-            return false;
+
+        char *dash = strchr(pattern_octets[i], '-');
+        if (dash != NULL)
+        {
+            int start = atoi(pattern_octets[i]);
+            int end = atoi(dash + 1);
+            if (ip_octets[i] < start || ip_octets[i] > end)
+                return false;
+        }
+        else
+        {
+            int pattern_val = atoi(pattern_octets[i]);
+            if (pattern_val != ip_octets[i])
+                return false;
+        }
     }
     return true;
 }

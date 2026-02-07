@@ -50,7 +50,31 @@ static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
 static char g_proxy_user[256] = "";
 static char g_proxy_pass[256] = "";
 
+typedef struct {
+    uint32_t id;
+    char *process_name;
+    char *target_hosts;
+    char *target_ports;
+    RuleProtocol protocol;
+    RuleAction action;
+    bool enabled;
+} RuleData;
+
+static GList *g_rules_list = NULL;
+static GtkWidget *rules_list_box = NULL;
+
 // --- Helper Functions ---
+// Forward declaration
+static void refresh_rules_ui();
+
+static void free_rule_data(RuleData *rule) {
+    if (rule) {
+        if (rule->process_name) free(rule->process_name);
+        if (rule->target_hosts) free(rule->target_hosts);
+        if (rule->target_ports) free(rule->target_ports);
+        free(rule);
+    }
+}
 
 static char* get_current_time_str() {
     time_t rawtime;
@@ -444,6 +468,371 @@ static void on_proxy_configure(GtkWidget *widget, gpointer data) {
     gtk_widget_destroy(info.dialog);
 }
 
+// --- Rules Management ---
+
+static void on_rule_delete(GtkWidget *widget, gpointer data) {
+    RuleData *rule = (RuleData *)data;
+    
+    // Call C API
+    ProxyBridge_DeleteRule(rule->id);
+    
+    // Remove from list
+    g_rules_list = g_list_remove(g_rules_list, rule);
+    free_rule_data(rule);
+    
+    // UI Refresh
+    refresh_rules_ui();
+}
+
+static void on_rule_toggle(GtkToggleButton *btn, gpointer data) {
+    RuleData *rule = (RuleData *)data;
+    rule->enabled = gtk_toggle_button_get_active(btn);
+    
+    if (rule->enabled) {
+        ProxyBridge_EnableRule(rule->id);
+    } else {
+        ProxyBridge_DisableRule(rule->id);
+    }
+}
+
+static void on_save_rule(GtkWidget *widget, gpointer data) {
+    GtkWidget **widgets = (GtkWidget **)data;
+    GtkWidget *dialog = widgets[0];
+    RuleData *edit_rule = (RuleData *)widgets[6]; // If not null, we are editing
+    
+    const char *proc = gtk_entry_get_text(GTK_ENTRY(widgets[1]));
+    const char *hosts = gtk_entry_get_text(GTK_ENTRY(widgets[2]));
+    const char *ports = gtk_entry_get_text(GTK_ENTRY(widgets[3]));
+    RuleProtocol proto = gtk_combo_box_get_active(GTK_COMBO_BOX(widgets[4]));
+    RuleAction action = gtk_combo_box_get_active(GTK_COMBO_BOX(widgets[5]));
+
+    if (strlen(proc) == 0) {
+        // Error
+        return;
+    }
+    
+    if (edit_rule) {
+        // Edit Existing
+        ProxyBridge_EditRule(edit_rule->id, proc, hosts, ports, proto, action);
+        
+        // Update Local
+        free(edit_rule->process_name); edit_rule->process_name = strdup(proc);
+        free(edit_rule->target_hosts); edit_rule->target_hosts = strdup(hosts);
+        free(edit_rule->target_ports); edit_rule->target_ports = strdup(ports);
+        edit_rule->protocol = proto;
+        edit_rule->action = action;
+        
+    } else {
+        // Add New
+        uint32_t new_id = ProxyBridge_AddRule(proc, hosts, ports, proto, action);
+        
+        RuleData *new_rule = malloc(sizeof(RuleData));
+        new_rule->id = new_id;
+        new_rule->process_name = strdup(proc);
+        new_rule->target_hosts = strdup(hosts);
+        new_rule->target_ports = strdup(ports);
+        new_rule->protocol = proto;
+        new_rule->action = action;
+        new_rule->enabled = true; // Default enabled
+        
+        g_rules_list = g_list_append(g_rules_list, new_rule);
+    }
+    
+    refresh_rules_ui();
+    gtk_widget_destroy(dialog);
+    free(widgets);
+}
+
+static void on_browse_clicked(GtkWidget *widget, gpointer data) {
+    GtkWidget *entry = (GtkWidget *)data;
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Select Application",
+                                      NULL,
+                                      GTK_FILE_CHOOSER_ACTION_OPEN,
+                                      "_Cancel", GTK_RESPONSE_CANCEL,
+                                      "_Select", GTK_RESPONSE_ACCEPT,
+                                      NULL);
+    
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        char *base = g_path_get_basename(filename);
+        gtk_entry_set_text(GTK_ENTRY(entry), base);
+        g_free(base);
+        g_free(filename);
+    }
+    gtk_widget_destroy(dialog);
+}
+
+static void open_rule_dialog(RuleData *rule) {
+    GtkWidget *dialog = gtk_dialog_new();
+    gtk_window_set_title(GTK_WINDOW(dialog), rule ? "Edit Rule" : "Add Rule");
+    gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(window));
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 500, 400);
+
+    GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
+    gtk_container_set_border_width(GTK_CONTAINER(grid), 15);
+    
+    // Process
+    GtkWidget *proc_entry = gtk_entry_new();
+    GtkWidget *browse_btn = gtk_button_new_with_label("Browse...");
+    g_signal_connect(browse_btn, "clicked", G_CALLBACK(on_browse_clicked), proc_entry);
+    
+    GtkWidget *proc_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_pack_start(GTK_BOX(proc_box), proc_entry, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(proc_box), browse_btn, FALSE, FALSE, 0);
+
+    GtkWidget *host_entry = gtk_entry_new();
+    GtkWidget *port_entry = gtk_entry_new();
+    
+    // Protocol
+    GtkWidget *proto_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(proto_combo), "TCP");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(proto_combo), "UDP");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(proto_combo), "BOTH");
+    
+    // Action
+    GtkWidget *action_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(action_combo), "PROXY");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(action_combo), "DIRECT");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(action_combo), "BLOCK");
+
+    if (rule) {
+        gtk_entry_set_text(GTK_ENTRY(proc_entry), rule->process_name);
+        gtk_entry_set_text(GTK_ENTRY(host_entry), rule->target_hosts);
+        gtk_entry_set_text(GTK_ENTRY(port_entry), rule->target_ports);
+        gtk_combo_box_set_active(GTK_COMBO_BOX(proto_combo), rule->protocol);
+        gtk_combo_box_set_active(GTK_COMBO_BOX(action_combo), rule->action);
+    } else {
+        gtk_entry_set_text(GTK_ENTRY(port_entry), "*"); // Default
+        gtk_entry_set_text(GTK_ENTRY(host_entry), "*"); // Default
+        gtk_combo_box_set_active(GTK_COMBO_BOX(proto_combo), 2); // BOTH
+        gtk_combo_box_set_active(GTK_COMBO_BOX(action_combo), 0); // PROXY
+    }
+
+    int row = 0;
+    
+    // Process Row
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Process Name:"), 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), proc_box, 1, row, 1, 1);
+    row++;
+    
+    // Process Hint
+    GtkWidget *proc_hint = gtk_label_new("Example: firefox; chrome; /usr/bin/wget");
+    gtk_style_context_add_class(gtk_widget_get_style_context(proc_hint), "dim-label");
+    gtk_widget_set_halign(proc_hint, GTK_ALIGN_START);
+    gtk_grid_attach(GTK_GRID(grid), proc_hint, 1, row, 1, 1);
+    row++;
+
+    // Host Row
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Target Host:"), 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), host_entry, 1, row, 1, 1);
+    row++;
+    
+    // Host Hint
+    GtkWidget *host_hint = gtk_label_new("Example: 192.168.1.*; 10.0.0.1-50; *");
+    gtk_style_context_add_class(gtk_widget_get_style_context(host_hint), "dim-label");
+    gtk_widget_set_halign(host_hint, GTK_ALIGN_START);
+    gtk_grid_attach(GTK_GRID(grid), host_hint, 1, row, 1, 1);
+    row++;
+
+    // Port Row
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Target Port:"), 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), port_entry, 1, row, 1, 1);
+    row++;
+    
+    // Port Hint
+    GtkWidget *port_hint = gtk_label_new("Example: 80; 443; 8000-8080; *");
+    gtk_style_context_add_class(gtk_widget_get_style_context(port_hint), "dim-label");
+    gtk_widget_set_halign(port_hint, GTK_ALIGN_START);
+    gtk_grid_attach(GTK_GRID(grid), port_hint, 1, row, 1, 1);
+    row++;
+    
+    // Protocol
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Protocol:"), 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), proto_combo, 1, row, 1, 1);
+    row++;
+    
+    // Action
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Action:"), 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), action_combo, 1, row, 1, 1);
+    row++;
+
+    gtk_container_add(GTK_CONTAINER(content), grid);
+    
+    GtkWidget *save_btn = gtk_button_new_with_label("Save");
+    GtkWidget *cancel_btn = gtk_button_new_with_label("Cancel");
+    gtk_dialog_add_action_widget(GTK_DIALOG(dialog), cancel_btn, GTK_RESPONSE_CANCEL);
+    gtk_dialog_add_action_widget(GTK_DIALOG(dialog), save_btn, GTK_RESPONSE_ACCEPT);
+    
+    // Pass everything needed to callback
+    GtkWidget **data = malloc(7 * sizeof(GtkWidget*));
+    data[0] = dialog;
+    data[1] = proc_entry;
+    data[2] = host_entry;
+    data[3] = port_entry;
+    data[4] = proto_combo;
+    data[5] = action_combo;
+    data[6] = (GtkWidget*)rule; // Hacky cast
+    
+    g_signal_connect(save_btn, "clicked", G_CALLBACK(on_save_rule), data);
+    g_signal_connect(cancel_btn, "clicked", G_CALLBACK(gtk_widget_destroy), NULL); 
+    // Simplified for now.
+
+    gtk_widget_show_all(dialog);
+}
+
+static void on_rule_edit(GtkWidget *widget, gpointer data) {
+    RuleData *rule = (RuleData *)data;
+    open_rule_dialog(rule);
+}
+
+static void on_rule_add_clicked(GtkWidget *widget, gpointer data) {
+    open_rule_dialog(NULL);
+}
+
+static void refresh_rules_ui() {
+    if (!rules_list_box) return;
+    
+    // Clear existing
+    GList *children, *iter;
+    children = gtk_container_get_children(GTK_CONTAINER(rules_list_box));
+    for(iter = children; iter != NULL; iter = g_list_next(iter))
+        gtk_widget_destroy(GTK_WIDGET(iter->data));
+    g_list_free(children);
+    
+    // Use GtkGrid for alignment
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 10);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 15);
+    gtk_container_add(GTK_CONTAINER(rules_list_box), grid);
+
+    // Headers
+    // Col 0: Enabled (small)
+    // Col 1: Actions (medium)
+    // Col 2: SR (small)
+    // Col 3: Process (expand)
+    // Col 4: Host (expand)
+    // Col 5: Protocol (fixed)
+    // Col 6: Action (fixed)
+    
+    int row = 0;
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("En"), 0, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Actions"), 1, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("SR"), 2, row, 1, 1);
+    
+    GtkWidget *h_proc = gtk_label_new("Process"); gtk_widget_set_halign(h_proc, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(h_proc, TRUE);
+    gtk_grid_attach(GTK_GRID(grid), h_proc, 3, row, 1, 1);
+    
+    GtkWidget *h_host = gtk_label_new("Target Hosts"); gtk_widget_set_halign(h_host, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(h_host, TRUE);
+    gtk_grid_attach(GTK_GRID(grid), h_host, 4, row, 1, 1);
+    
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Protocol"), 5, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Action"), 6, row, 1, 1);
+    
+    // Separator
+    row++;
+    gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row, 7, 1);
+    row++;
+
+    // Data Rows
+    int sr_counter = 1;
+    for (GList *l = g_rules_list; l != NULL; l = l->next) {
+        RuleData *r = (RuleData *)l->data;
+        
+        // Enabled
+        GtkWidget *chk = gtk_check_button_new();
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(chk), r->enabled);
+        g_signal_connect(chk, "toggled", G_CALLBACK(on_rule_toggle), r);
+        gtk_grid_attach(GTK_GRID(grid), chk, 0, row, 1, 1);
+        
+        // Actions
+        GtkWidget *act_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+        GtkWidget *btn_edit = gtk_button_new_with_label("Edit");
+        g_signal_connect(btn_edit, "clicked", G_CALLBACK(on_rule_edit), r);
+        GtkWidget *btn_del = gtk_button_new_with_label("Delete");
+        g_signal_connect(btn_del, "clicked", G_CALLBACK(on_rule_delete), r);
+        gtk_box_pack_start(GTK_BOX(act_box), btn_edit, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(act_box), btn_del, FALSE, FALSE, 0);
+        gtk_grid_attach(GTK_GRID(grid), act_box, 1, row, 1, 1);
+        
+        // SR
+        char sr_str[8]; sprintf(sr_str, "%d", sr_counter++);
+        gtk_grid_attach(GTK_GRID(grid), gtk_label_new(sr_str), 2, row, 1, 1);
+        
+        // Process
+        GtkWidget *l_proc = gtk_label_new(r->process_name); 
+        gtk_widget_set_halign(l_proc, GTK_ALIGN_START);
+        gtk_label_set_ellipsize(GTK_LABEL(l_proc), PANGO_ELLIPSIZE_END);
+        gtk_grid_attach(GTK_GRID(grid), l_proc, 3, row, 1, 1);
+        
+        // Host
+        GtkWidget *l_host = gtk_label_new(r->target_hosts); 
+        gtk_widget_set_halign(l_host, GTK_ALIGN_START);
+        gtk_label_set_ellipsize(GTK_LABEL(l_host), PANGO_ELLIPSIZE_END);
+        gtk_grid_attach(GTK_GRID(grid), l_host, 4, row, 1, 1);
+        
+        // Protocol
+        const char* proto_strs[] = {"TCP", "UDP", "BOTH"};
+        gtk_grid_attach(GTK_GRID(grid), gtk_label_new(proto_strs[r->protocol]), 5, row, 1, 1);
+        
+        // Action
+        const char* action_strs[] = {"PROXY", "DIRECT", "BLOCK"};
+        GtkWidget *l_act = gtk_label_new(action_strs[r->action]);
+        // Set Color
+        GtkStyleContext *context = gtk_widget_get_style_context(l_act);
+        if (r->action == RULE_ACTION_PROXY) gtk_style_context_add_class(context, "success");
+        else if (r->action == RULE_ACTION_BLOCK) gtk_style_context_add_class(context, "error");
+        else gtk_style_context_add_class(context, "warning");
+        
+        gtk_grid_attach(GTK_GRID(grid), l_act, 6, row, 1, 1);
+        
+        row++;
+        gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row, 7, 1);
+        row++;
+    }
+    
+    gtk_widget_show_all(rules_list_box);
+}
+
+static void on_proxy_rules_clicked(GtkWidget *widget, gpointer data) {
+    GtkWidget *dialog = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(dialog), "Process Rules");
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 800, 500);
+    gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(window));
+    
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_container_set_border_width(GTK_CONTAINER(vbox), 20);
+    gtk_container_add(GTK_CONTAINER(dialog), vbox);
+    
+    // Header Row with Title and Add Button
+    GtkWidget *header_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    GtkWidget *title = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(title), "<span size='x-large' weight='bold'>Process Rules</span>");
+    
+    GtkWidget *add_btn = gtk_button_new_with_label("+ Add Rule");
+    g_signal_connect(add_btn, "clicked", G_CALLBACK(on_rule_add_clicked), NULL);
+    
+    gtk_box_pack_start(GTK_BOX(header_box), title, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(header_box), add_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), header_box, FALSE, FALSE, 0);
+    
+    // Rules List Area
+    GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
+    gtk_widget_set_vexpand(scrolled, TRUE);
+    rules_list_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_add(GTK_CONTAINER(scrolled), rules_list_box);
+    gtk_box_pack_start(GTK_BOX(vbox), scrolled, TRUE, TRUE, 0);
+    
+    refresh_rules_ui();
+    
+    gtk_widget_show_all(dialog);
+}
+
 static void on_about(GtkWidget *widget, gpointer data) {
     GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
                                            GTK_DIALOG_DESTROY_WITH_PARENT,
@@ -506,10 +895,15 @@ int main(int argc, char *argv[]) {
     GtkWidget *proxy_menu_item = gtk_menu_item_new_with_label("Proxy");
     GtkWidget *proxy_menu = gtk_menu_new();
     GtkWidget *config_item = gtk_menu_item_new_with_label("Proxy Settings");
+    GtkWidget *rules_item = gtk_menu_item_new_with_label("Proxy Rules");
     GtkWidget *exit_item = gtk_menu_item_new_with_label("Exit");
+    
     g_signal_connect(config_item, "activate", G_CALLBACK(on_proxy_configure), NULL);
+    g_signal_connect(rules_item, "activate", G_CALLBACK(on_proxy_rules_clicked), NULL);
     g_signal_connect(exit_item, "activate", G_CALLBACK(on_window_destroy), NULL);
+    
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), config_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), rules_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), gtk_separator_menu_item_new());
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), exit_item);
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(proxy_menu_item), proxy_menu);
