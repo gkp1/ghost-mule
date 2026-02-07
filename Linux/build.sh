@@ -44,9 +44,27 @@ fi
 echo ""
 
 # Move binaries to output
+echo "=== Building GUI ==="
+cd "$SCRIPT_DIR"
+rm -f ProxyBridgeGUI
+if pkg-config --exists gtk+-3.0; then
+    gcc -Wall -Wno-unused-parameter -O3 -Isrc -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -Wformat -Wformat-security -Werror=format-security -fno-strict-overflow -fno-delete-null-pointer-checks -fwrapv -c gui/main.c -o gui_main.o $(pkg-config --cflags gtk+-3.0)
+    gcc -o ProxyBridgeGUI gui_main.o -Lsrc -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack -s -Wl,-rpath,'$ORIGIN/.' -lproxybridge -lpthread $(pkg-config --libs gtk+-3.0) -export-dynamic
+    rm -f gui_main.o
+    echo "✓ GUI build successful"
+else
+    echo "⚠ GTK3 not found. Skipping GUI build."
+    echo "  Install with: sudo apt install libgtk-3-dev  (Debian/Ubuntu/Mint)"
+    echo "                sudo dnf install gtk3-devel    (Fedora)"
+fi
+
+echo ""
 echo "Moving binaries to output directory..."
 mv "$SCRIPT_DIR/src/libproxybridge.so" "$OUTPUT_DIR/"
-mv ProxyBridge "$OUTPUT_DIR/"
+mv "$SCRIPT_DIR/cli/ProxyBridge" "$OUTPUT_DIR/"
+if [ -f ProxyBridgeGUI ]; then
+    mv ProxyBridgeGUI "$OUTPUT_DIR/"
+fi
 echo "✓ Binaries moved to output"
 echo ""
 
