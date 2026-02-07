@@ -6,14 +6,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo ""
 echo "==================================="
-echo "ProxyBridge Deployment Script"
+echo "ProxyBridge Setup Script"
 echo "==================================="
 echo ""
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then 
     echo "ERROR: This script must be run as root"
-    echo "Please run: sudo ./deploy.sh"
+    echo "Please run: sudo ./setup.sh"
     exit 1
 fi
 
@@ -53,35 +53,36 @@ install_dependencies() {
         ubuntu|debian|linuxmint|pop|elementary|zorin|kali|raspbian|mx|antix|deepin|lmde)
             echo "Using apt package manager..."
             apt-get update -qq
-            apt-get install -y libnetfilter-queue1 libnfnetlink0 iptables
+            # libgtk-3-0 is for runtime, libnetfilter-queue1 for functionality
+            apt-get install -y libnetfilter-queue1 libnfnetlink0 iptables libgtk-3-0
             ;;
         fedora)
             echo "Using dnf package manager..."
-            dnf install -y libnetfilter_queue libnfnetlink iptables
+            dnf install -y libnetfilter_queue libnfnetlink iptables gtk3
             ;;
         rhel|centos|rocky|almalinux)
             echo "Using yum package manager..."
-            yum install -y libnetfilter_queue libnfnetlink iptables
+            yum install -y libnetfilter_queue libnfnetlink iptables gtk3
             ;;
         arch|manjaro|endeavouros|garuda)
             echo "Using pacman package manager..."
-            pacman -Sy --noconfirm libnetfilter_queue libnfnetlink iptables
+            pacman -Sy --noconfirm libnetfilter_queue libnfnetlink iptables gtk3
             ;;
         opensuse*|sles)
             echo "Using zypper package manager..."
-            zypper install -y libnetfilter_queue1 libnfnetlink0 iptables
+            zypper install -y libnetfilter_queue1 libnfnetlink0 iptables gtk3
             ;;
         void)
             echo "Using xbps package manager..."
-            xbps-install -Sy libnetfilter_queue libnfnetlink iptables
+            xbps-install -Sy libnetfilter_queue libnfnetlink iptables gtk3
             ;;
         *)
             echo "WARNING: Unknown distribution '$DISTRO' (family: '$DISTRO_LIKE')"
             echo ""
             echo "Please manually install the following packages:"
-            echo "  Debian/Ubuntu: sudo apt install libnetfilter-queue1 libnfnetlink0 iptables"
-            echo "  Fedora:        sudo dnf install libnetfilter_queue libnfnetlink iptables"
-            echo "  Arch:          sudo pacman -S libnetfilter_queue libnfnetlink iptables"
+            echo "  Debian/Ubuntu: sudo apt install libnetfilter-queue1 libnfnetlink0 iptables libgtk-3-0"
+            echo "  Fedora:        sudo dnf install libnetfilter_queue libnfnetlink iptables gtk3"
+            echo "  Arch:          sudo pacman -S libnetfilter_queue libnfnetlink iptables gtk3"
             echo ""
             read -p "Continue anyway? (y/n) " -n 1 -r
             echo
@@ -115,6 +116,10 @@ check_files() {
         exit 1
     fi
     
+    if [ ! -f "$SCRIPT_DIR/ProxyBridgeGUI" ]; then
+         echo "WARNING: ProxyBridgeGUI binary not found in $SCRIPT_DIR - GUI will not be installed"
+    fi
+    
     echo "All files present"
 }
 
@@ -124,8 +129,8 @@ install_files() {
     echo "Installing ProxyBridge..."
     
     # Create directories if they don't exist
-    mkdir -p "$LIB_PATH"
-    mkdir -p /usr/local/bin
+    mkdir -p "$LIB_PATH" /usr/local/bin /etc/proxybridge
+    chmod 755 /etc/proxybridge
     
     # Copy library
     echo "Installing libproxybridge.so to $LIB_PATH..."
@@ -136,6 +141,12 @@ install_files() {
     echo "Installing ProxyBridge to /usr/local/bin..."
     cp "$SCRIPT_DIR/ProxyBridge" /usr/local/bin/
     chmod 755 /usr/local/bin/ProxyBridge
+
+    if [ -f "$SCRIPT_DIR/ProxyBridgeGUI" ]; then
+        echo "Installing ProxyBridgeGUI to /usr/local/bin..."
+        cp "$SCRIPT_DIR/ProxyBridgeGUI" /usr/local/bin/
+        chmod 755 /usr/local/bin/ProxyBridgeGUI 
+    fi
     
     echo "Files installed"
 }
@@ -213,6 +224,9 @@ main() {
     echo ""
     echo "You can now run ProxyBridge from anywhere:"
     echo "  sudo ProxyBridge --help"
+    if [ -f /usr/local/bin/ProxyBridgeGUI ]; then
+       echo "  sudo ProxyBridgeGUI      (Graphical Interface)"
+    fi
     echo "  sudo ProxyBridge --proxy socks5://IP:PORT --rule \"app:*:*:TCP:PROXY\""
     echo ""
     echo "For cleanup after crash:"
