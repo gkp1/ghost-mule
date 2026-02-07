@@ -229,7 +229,7 @@ static ssize_t send_all(int sock, const char *buf, size_t len)
 {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = send(sock, buf + sent, len - sent, 0);
+        ssize_t n = send(sock, buf + sent, len - sent, MSG_NOSIGNAL);
         if (n < 0) return -1;
         sent += n;
     }
@@ -993,8 +993,8 @@ static void* connection_handler(void *arg)
         return NULL;
     }
 
-    configure_tcp_socket(proxy_sock, 524288, 30000);
-    configure_tcp_socket(client_sock, 524288, 30000);
+    configure_tcp_socket(proxy_sock, 1048576, 60000);
+    configure_tcp_socket(client_sock, 1048576, 60000);
 
     memset(&proxy_addr, 0, sizeof(proxy_addr));
     proxy_addr.sin_family = AF_INET;
@@ -1046,55 +1046,194 @@ static void* connection_handler(void *arg)
     return NULL;
 }
 
-// Bidirectional transfer handler using poll() for efficiency
+// High-performance bidirectional relay using splice() for zero-copy transfer.
+// Data moves kernel→kernel through a pipe, never touching userspace memory.
+// This eliminates the main throughput bottleneck of copying data through userspace.
 static void* transfer_handler(void *arg)
 {
     transfer_config_t *config = (transfer_config_t *)arg;
     int sock1 = config->from_socket;  // client socket
     int sock2 = config->to_socket;    // proxy socket
-    char buf[262144];  // 256KB buffer for throughput
-    ssize_t len;
-
     free(config);
 
-    struct pollfd fds[2];
-    fds[0].fd = sock1;
-    fds[0].events = POLLIN;
-    fds[1].fd = sock2;
-    fds[1].events = POLLIN;
+    // Create pipes for splice: one per direction
+    // pipe_a: sock2 (proxy) → sock1 (client) = DOWNLOAD
+    // pipe_b: sock1 (client) → sock2 (proxy) = UPLOAD
+    int pipe_a[2] = {-1, -1};
+    int pipe_b[2] = {-1, -1};
 
-    while (1)
+    if (pipe2(pipe_a, O_CLOEXEC | O_NONBLOCK) < 0 ||
+        pipe2(pipe_b, O_CLOEXEC | O_NONBLOCK) < 0) {
+        // pipe creation failed - close any that opened and fall back
+        if (pipe_a[0] >= 0) { close(pipe_a[0]); close(pipe_a[1]); }
+        if (pipe_b[0] >= 0) { close(pipe_b[0]); close(pipe_b[1]); }
+        goto fallback;
+    }
+
+    // Increase pipe capacity for throughput (default 64KB → 1MB)
+    fcntl(pipe_a[0], F_SETPIPE_SZ, 1048576);
+    fcntl(pipe_b[0], F_SETPIPE_SZ, 1048576);
+
+    // Make sockets non-blocking for splice
+    fcntl(sock1, F_SETFL, fcntl(sock1, F_GETFL, 0) | O_NONBLOCK);
+    fcntl(sock2, F_SETFL, fcntl(sock2, F_GETFL, 0) | O_NONBLOCK);
+
     {
-        int ready = poll(fds, 2, 30000); // 30s timeout
+        struct pollfd fds[2];
+        ssize_t pipe_a_bytes = 0; // bytes in download pipe (proxy→client)
+        ssize_t pipe_b_bytes = 0; // bytes in upload pipe (client→proxy)
+        bool sock1_done = false;  // client EOF or error
+        bool sock2_done = false;  // proxy EOF or error
+        bool shut_wr_sock1 = false; // already called shutdown(sock1, SHUT_WR)
+        bool shut_wr_sock2 = false; // already called shutdown(sock2, SHUT_WR)
 
-        if (ready < 0)
-            break;
-
-        if (ready == 0)
-            continue; // timeout, check if still running
-
-        // Check client to proxy
-        if (fds[0].revents & (POLLIN | POLLHUP | POLLERR))
+        while (1)
         {
-            len = recv(sock1, buf, sizeof(buf), 0);
-            if (len <= 0)
-                break;
-            if (send_all(sock2, buf, len) < 0)
-                break;
-        }
+            // Build poll set - use fd=-1 to exclude sockets we're done with
+            // CRITICAL: poll() always reports POLLHUP even if events=0,
+            // causing a busy-loop. Setting fd=-1 makes poll() skip the entry entirely.
+            fds[0].fd = (!sock1_done || pipe_a_bytes > 0 || pipe_b_bytes > 0) ? sock1 : -1;
+            fds[1].fd = (!sock2_done || pipe_b_bytes > 0 || pipe_a_bytes > 0) ? sock2 : -1;
+            fds[0].events = 0;
+            fds[1].events = 0;
+            fds[0].revents = 0;
+            fds[1].revents = 0;
 
-        // Check proxy to client
-        if (fds[1].revents & (POLLIN | POLLHUP | POLLERR))
-        {
-            len = recv(sock2, buf, sizeof(buf), 0);
-            if (len <= 0)
+            // Download direction: proxy→pipe_a→client
+            if (!sock2_done && pipe_a_bytes == 0)
+                fds[1].events |= POLLIN;    // read from proxy
+            if (pipe_a_bytes > 0)
+                fds[0].events |= POLLOUT;   // write to client
+
+            // Upload direction: client→pipe_b→proxy
+            if (!sock1_done && pipe_b_bytes == 0)
+                fds[0].events |= POLLIN;    // read from client
+            if (pipe_b_bytes > 0)
+                fds[1].events |= POLLOUT;   // write to proxy
+
+            // Nothing left to do
+            if (fds[0].fd == -1 && fds[1].fd == -1)
                 break;
-            if (send_all(sock1, buf, len) < 0)
+            if (fds[0].events == 0 && fds[1].events == 0)
+                break;
+
+            int ready = poll(fds, 2, 60000);
+            if (ready < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (ready == 0)
+                break; // 60s idle timeout
+
+            // Handle errors and hangups on each socket
+            if (fds[0].revents & POLLERR) break;
+            if (fds[1].revents & POLLERR) break;
+
+            // POLLHUP means peer closed - treat as EOF for reads
+            if ((fds[1].revents & POLLHUP) && !(fds[1].revents & POLLIN))
+                sock2_done = true;
+            if ((fds[0].revents & POLLHUP) && !(fds[0].revents & POLLIN))
+                sock1_done = true;
+
+            // === DOWNLOAD: proxy (sock2) → pipe_a → client (sock1) ===
+
+            if (!sock2_done && pipe_a_bytes == 0 && (fds[1].revents & POLLIN)) {
+                ssize_t n = splice(sock2, NULL, pipe_a[1], NULL, 1048576,
+                                  SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (n > 0) {
+                    pipe_a_bytes = n;
+                } else if (n == 0) {
+                    sock2_done = true;
+                } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    sock2_done = true;
+                }
+            }
+
+            if (pipe_a_bytes > 0 && (fds[0].revents & POLLOUT)) {
+                ssize_t n = splice(pipe_a[0], NULL, sock1, NULL, pipe_a_bytes,
+                                  SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (n > 0) {
+                    pipe_a_bytes -= n;
+                } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    break;
+                }
+            }
+
+            // === UPLOAD: client (sock1) → pipe_b → proxy (sock2) ===
+
+            if (!sock1_done && pipe_b_bytes == 0 && (fds[0].revents & POLLIN)) {
+                ssize_t n = splice(sock1, NULL, pipe_b[1], NULL, 1048576,
+                                  SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (n > 0) {
+                    pipe_b_bytes = n;
+                } else if (n == 0) {
+                    sock1_done = true;
+                } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    sock1_done = true;
+                }
+            }
+
+            if (pipe_b_bytes > 0 && (fds[1].revents & POLLOUT)) {
+                ssize_t n = splice(pipe_b[0], NULL, sock2, NULL, pipe_b_bytes,
+                                  SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (n > 0) {
+                    pipe_b_bytes -= n;
+                } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    break;
+                }
+            }
+
+            // Half-close: when one side is done and its pipe is drained,
+            // signal the other side with shutdown(SHUT_WR)
+            if (sock2_done && pipe_a_bytes == 0 && !shut_wr_sock1) {
+                shutdown(sock1, SHUT_WR);
+                shut_wr_sock1 = true;
+            }
+            if (sock1_done && pipe_b_bytes == 0 && !shut_wr_sock2) {
+                shutdown(sock2, SHUT_WR);
+                shut_wr_sock2 = true;
+            }
+
+            // Both sides done and all pipes drained
+            if (sock1_done && sock2_done && pipe_a_bytes == 0 && pipe_b_bytes == 0)
                 break;
         }
     }
 
-    // Cleanup
+    close(pipe_a[0]); close(pipe_a[1]);
+    close(pipe_b[0]); close(pipe_b[1]);
+    goto cleanup;
+
+fallback:
+    // Fallback: traditional recv/send relay if pipes failed
+    {
+        char buf[131072];
+        struct pollfd fds[2];
+        fds[0].fd = sock1;
+        fds[0].events = POLLIN;
+        fds[1].fd = sock2;
+        fds[1].events = POLLIN;
+
+        while (1) {
+            int ready = poll(fds, 2, 60000);
+            if (ready <= 0) break;
+
+            if (fds[0].revents & (POLLERR | POLLHUP | POLLIN)) {
+                if (fds[0].revents & POLLERR) break;
+                ssize_t n = recv(sock1, buf, sizeof(buf), MSG_NOSIGNAL);
+                if (n <= 0) break;
+                if (send_all(sock2, buf, n) < 0) break;
+            }
+            if (fds[1].revents & (POLLERR | POLLHUP | POLLIN)) {
+                if (fds[1].revents & POLLERR) break;
+                ssize_t n = recv(sock2, buf, sizeof(buf), MSG_NOSIGNAL);
+                if (n <= 0) break;
+                if (send_all(sock1, buf, n) < 0) break;
+            }
+        }
+    }
+
+cleanup:
     shutdown(sock1, SHUT_RDWR);
     shutdown(sock2, SHUT_RDWR);
     close(sock1);
@@ -1102,7 +1241,7 @@ static void* transfer_handler(void *arg)
     return NULL;
 }
 
-// Windows-style proxy server - accepts and spawns thread per connection
+// Proxy server - accepts connections and spawns relay threads
 static void* local_proxy_server(void *arg)
 {
     (void)arg;
@@ -1110,7 +1249,7 @@ static void* local_proxy_server(void *arg)
     int listen_sock;
     int on = 1;
 
-    listen_sock = socket(AF_INET, SOCK_STREAM, 0);
+    listen_sock = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (listen_sock < 0)
     {
         log_message("Socket creation failed");
@@ -1139,19 +1278,26 @@ static void* local_proxy_server(void *arg)
         return NULL;
     }
 
+    // Pre-create thread attributes with small stack (256KB instead of 8MB default)
+    // Each relay thread only needs splice() state - no 256KB userspace buffer anymore
+    pthread_attr_t thread_attr;
+    pthread_attr_init(&thread_attr);
+    pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_DETACHED);
+    pthread_attr_setstacksize(&thread_attr, 262144); // 256KB stack
+
+    struct pollfd pfd;
+    pfd.fd = listen_sock;
+    pfd.events = POLLIN;
+
     while (running)
     {
-        fd_set read_fds;
-        FD_ZERO(&read_fds);
-        FD_SET(listen_sock, &read_fds);
-        struct timeval timeout = {1, 0};
-
-        if (select(FD_SETSIZE, &read_fds, NULL, NULL, &timeout) <= 0)
+        int ready = poll(&pfd, 1, 1000); // 1s timeout
+        if (ready <= 0)
             continue;
 
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
-        int client_sock = accept(listen_sock, (struct sockaddr *)&client_addr, &addr_len);
+        int client_sock = accept4(listen_sock, (struct sockaddr *)&client_addr, &addr_len, SOCK_CLOEXEC);
 
         if (client_sock < 0)
             continue;
@@ -1174,15 +1320,15 @@ static void* local_proxy_server(void *arg)
         }
 
         pthread_t conn_thread;
-        if (pthread_create(&conn_thread, NULL, connection_handler, (void*)conn_config) != 0)
+        if (pthread_create(&conn_thread, &thread_attr, connection_handler, (void*)conn_config) != 0)
         {
             close(client_sock);
             free(conn_config);
             continue;
         }
-        pthread_detach(conn_thread);
     }
 
+    pthread_attr_destroy(&thread_attr);
     close(listen_sock);
     return NULL;
 }
@@ -2344,6 +2490,14 @@ bool ProxyBridge_Start(void)
 
     running = true;
     g_current_process_id = getpid();
+
+    // Raise system socket buffer limits for high throughput (requires root)
+    // Default rmem_max/wmem_max is usually 208KB, far too small for >100Mbps
+    FILE *fp;
+    fp = fopen("/proc/sys/net/core/rmem_max", "w");
+    if (fp) { fprintf(fp, "4194304"); fclose(fp); } // 4MB
+    fp = fopen("/proc/sys/net/core/wmem_max", "w");
+    if (fp) { fprintf(fp, "4194304"); fclose(fp); } // 4MB
 
     if (pthread_create(&proxy_thread, NULL, local_proxy_server, NULL) != 0)
     {
