@@ -6,7 +6,19 @@
 #include <time.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include "ProxyBridge.h"
+
+static long safe_strtol(const char *nptr) {
+    if (!nptr) return 0; // Handle NULL
+    char *endptr;
+    long val = strtol(nptr, &endptr, 10);
+    // You could check errno here if needed, but for GUI fields 0 is often a safe fallback or filtered before
+    if (endptr == nptr) return 0; // No digits found
+    return val;
+}
 
 // --- Global UI Widgets ---
 static GtkWidget *window;
@@ -290,7 +302,7 @@ static void on_start_test_clicked(GtkWidget *widget, gpointer data) {
     
     // 2. Set Proxy Config
     ProxyType type = (gtk_combo_box_get_active(GTK_COMBO_BOX(info->type_combo)) == 0) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
-    int port = atoi(port_text);
+    int port = (int)safe_strtol(port_text);
     const char *user = gtk_entry_get_text(GTK_ENTRY(info->user_entry));
     const char *pass = gtk_entry_get_text(GTK_ENTRY(info->pass_entry));
     
@@ -301,7 +313,7 @@ static void on_start_test_clicked(GtkWidget *widget, gpointer data) {
     const char *t_port_s = gtk_entry_get_text(GTK_ENTRY(info->test_port));
     
     if (!t_host || strlen(t_host) == 0) t_host = "google.com";
-    int t_port = atoi(t_port_s);
+    int t_port = (int)safe_strtol(t_port_s);
     if (t_port <= 0) t_port = 80;
     
     // 4. Update UI
@@ -362,8 +374,8 @@ static void on_proxy_configure(GtkWidget *widget, gpointer data) {
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Port:"), 0, 2, 1, 1);
     info.port_entry = gtk_entry_new();
     if (g_proxy_port != 0) {
-        char port_str[8];
-        sprintf(port_str, "%d", g_proxy_port);
+        char port_str[16];
+        snprintf(port_str, sizeof(port_str), "%d", g_proxy_port);
         gtk_entry_set_text(GTK_ENTRY(info.port_entry), port_str);
     }
     gtk_grid_attach(GTK_GRID(grid), info.port_entry, 1, 2, 3, 1);
@@ -444,7 +456,7 @@ static void on_proxy_configure(GtkWidget *widget, gpointer data) {
             continue;
         }
 
-        int p = atoi(port_text);
+        int p = (int)safe_strtol(port_text);
         if (p < 1 || p > 65535) {
             GtkWidget *err = gtk_message_dialog_new(GTK_WINDOW(info.dialog), GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Port must be between 1 and 65535.");
              gtk_dialog_run(GTK_DIALOG(err));
@@ -1049,7 +1061,7 @@ static void refresh_rules_ui() {
         gtk_grid_attach(GTK_GRID(grid), act_box, 2, row, 1, 1);
         
         // SR
-        char sr_str[8]; sprintf(sr_str, "%d", sr_counter++);
+        char sr_str[16]; snprintf(sr_str, sizeof(sr_str), "%d", sr_counter++);
         gtk_grid_attach(GTK_GRID(grid), gtk_label_new(sr_str), 3, row, 1, 1);
         
         // Process
@@ -1194,14 +1206,40 @@ static void on_create_update_script_and_run() {
     ProxyBridge_Stop();
     
     const char *script_url = "https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh";
-    const char *script_path = "/tmp/proxybridge_deploy.sh";
     
-    char dl_cmd[512];
-    snprintf(dl_cmd, sizeof(dl_cmd), "curl -s -o %s %s && chmod +x %s", script_path, script_url, script_path);
+    // Secure temp directory
+    char tmp_dir_tpl[] = "/tmp/pb_update_XXXXXX";
+    char *tmp_dir = mkdtemp(tmp_dir_tpl);
+    if (!tmp_dir) {
+        fprintf(stderr, "Failed to create temp directory for update.\n");
+        exit(1);
+    }
     
-    if (system(dl_cmd) != 0) {
-        // This likely won't be seen if we are shutting down, but worth a try (or stderr)
-        fprintf(stderr, "Failed to download update script.\n");
+    char script_path[512];
+    snprintf(script_path, sizeof(script_path), "%s/deploy.sh", tmp_dir);
+    
+    // Download using fork/exec of curl, safer than system()
+    pid_t pid = fork();
+    if (pid == -1) {
+        fprintf(stderr, "Fork failed.\n");
+        exit(1);
+    } else if (pid == 0) {
+        // Child
+        execlp("curl", "curl", "-s", "-o", script_path, script_url, NULL);
+        _exit(127);
+    } else {
+        // Parent
+        int status;
+        waitpid(pid, &status, 0);
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "Failed to download update script.\n");
+            exit(1);
+        }
+    }
+    
+    // chmod +x
+    if (chmod(script_path, S_IRWXU) != 0) {
+        perror("chmod failed");
         exit(1);
     }
     
@@ -1212,30 +1250,44 @@ static void on_create_update_script_and_run() {
 
 static void on_check_update(GtkWidget *widget, gpointer data) {
     const char *url = "https://api.github.com/repos/InterceptSuite/ProxyBridge/releases/latest";
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "curl -s -H \"User-Agent: ProxyBridge-Linux\" %s", url);
+    char *cmd = g_strdup_printf("curl -s -H \"User-Agent: ProxyBridge-Linux\" %s", url);
     
-    FILE *fp = popen(cmd, "r");
-    if (!fp) {
-         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to contact update server.");
+    char *standard_output = NULL;
+    char *standard_error = NULL;
+    GError *error = NULL;
+    int exit_status = 0;
+
+    // Use GLib spawn instead of popen for safety and correct signal handling
+    gboolean result = g_spawn_command_line_sync(cmd,
+                                                &standard_output,
+                                                &standard_error,
+                                                &exit_status,
+                                                &error);
+    g_free(cmd);
+
+    if (!result) {
+         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to launch update check: %s", error ? error->message : "Unknown error");
          gtk_dialog_run(GTK_DIALOG(msg));
          gtk_widget_destroy(msg);
+         if (error) g_error_free(error);
+         return;
+    }
+
+    if (exit_status != 0 || !standard_output || strlen(standard_output) == 0) {
+         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Update check failed (Exit: %d).", exit_status);
+         gtk_dialog_run(GTK_DIALOG(msg));
+         gtk_widget_destroy(msg);
+         g_free(standard_output);
+         g_free(standard_error);
          return;
     }
     
-    char buffer[4096];
-    size_t n = fread(buffer, 1, sizeof(buffer)-1, fp);
-    buffer[n] = 0;
-    pclose(fp);
-    
-    if (n == 0) {
-         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Empty response from update server.");
-         gtk_dialog_run(GTK_DIALOG(msg));
-         gtk_widget_destroy(msg);
-         return;
-    }
-    
-    char *tag_name = extract_sub_json_str(buffer, "tag_name");
+    // Copy to buffer for existing logic (simplified)
+    // Or just use standard_output directly
+    char *tag_name = extract_sub_json_str(standard_output, "tag_name");
+    g_free(standard_output);
+    g_free(standard_error);
+
     if (!tag_name) {
          GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "Could not parse version info.\nResponse might be rate limited.");
          gtk_dialog_run(GTK_DIALOG(msg));

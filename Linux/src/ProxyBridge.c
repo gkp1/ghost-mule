@@ -24,6 +24,7 @@
 #include <linux/sock_diag.h>
 #include <linux/inet_diag.h>
 #include <netdb.h>
+#include <sys/wait.h>
 #include "ProxyBridge.h"
 
 #define LOCAL_PROXY_PORT 34010
@@ -37,6 +38,68 @@
 #define SOCKS5_BUFFER_SIZE 1024
 #define HTTP_BUFFER_SIZE 1024
 #define LOG_BUFFER_SIZE 1024
+
+// Secure replacement for system() to avoid shell injection and adhere to secure coding practices
+static int run_command_v(const char *cmd_path, char *const argv[]) {
+    pid_t pid = fork();
+    if (pid == -1) {
+        return -1;
+    } else if (pid == 0) {
+        // Child
+        // Redirect stdout/stderr to /dev/null
+        int fd = open("/dev/null", O_WRONLY);
+        if (fd >= 0) {
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            close(fd);
+        }
+        execvp(cmd_path, argv);
+        _exit(127); // Access denied or not found
+    } else {
+        // Parent
+        int status;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status)) {
+            return WEXITSTATUS(status);
+        }
+        return -1;
+    }
+}
+
+// Helper to run simple commands without arguments or simplified interface
+static int run_iptables_cmd(const char *arg1, const char *arg2, const char *arg3, const char *arg4, const char *arg5, const char *arg6, const char *arg7, const char *arg8, const char *arg9, const char *arg10, const char *arg11, const char *arg12, const char *arg13, const char *arg14) {
+    // Construct argv excluding NULLs
+    const char *argv[17];
+    int i = 0;
+    argv[i++] = "iptables";
+    if (arg1) argv[i++] = arg1;
+    if (arg2) argv[i++] = arg2;
+    if (arg3) argv[i++] = arg3;
+    if (arg4) argv[i++] = arg4;
+    if (arg5) argv[i++] = arg5;
+    if (arg6) argv[i++] = arg6;
+    if (arg7) argv[i++] = arg7;
+    if (arg8) argv[i++] = arg8;
+    if (arg9) argv[i++] = arg9;
+    if (arg10) argv[i++] = arg10;
+    if (arg11) argv[i++] = arg11;
+    if (arg12) argv[i++] = arg12;
+    if (arg13) argv[i++] = arg13;
+    if (arg14) argv[i++] = arg14;
+    argv[i] = NULL;
+    
+    return run_command_v("iptables", (char **)argv);
+}
+
+// Helper for strtol to replace atoi
+static int safe_atoi(const char *str) {
+    if (!str) return 0;
+    char *endptr;
+    long val = strtol(str, &endptr, 10);
+    if (endptr == str) return 0;
+    return (int)val;
+}
+
 
 typedef struct PROCESS_RULE {
     uint32_t rule_id;
@@ -324,7 +387,7 @@ static uint32_t find_pid_from_inode(unsigned long target_inode, uint32_t uid_hin
             if (link_len == expected_len) {
                 link_target[link_len] = '\0';
                 if (memcmp(link_target, expected, expected_len) == 0) {
-                    pid = (uint32_t)atoi(proc_entry->d_name);
+                    pid = (uint32_t)safe_atoi(proc_entry->d_name);
                     closedir(fd_dir);
                     closedir(proc_dir);
                     return pid;
@@ -531,14 +594,14 @@ static bool match_ip_pattern(const char *pattern, uint32_t ip)
         char *dash = strchr(pattern_octets[i], '-');
         if (dash != NULL)
         {
-            int start = atoi(pattern_octets[i]);
-            int end = atoi(dash + 1);
+            int start = safe_atoi(pattern_octets[i]);
+            int end = safe_atoi(dash + 1);
             if (ip_octets[i] < start || ip_octets[i] > end)
                 return false;
         }
         else
         {
-            int pattern_val = atoi(pattern_octets[i]);
+            int pattern_val = safe_atoi(pattern_octets[i]);
             if (pattern_val != ip_octets[i])
                 return false;
         }
@@ -554,12 +617,12 @@ static bool match_port_pattern(const char *pattern, uint16_t port)
     char *dash = strchr(pattern, '-');
     if (dash != NULL)
     {
-        int start_port = atoi(pattern);
-        int end_port = atoi(dash + 1);
+        int start_port = safe_atoi(pattern);
+        int end_port = safe_atoi(dash + 1);
         return (port >= start_port && port <= end_port);
     }
 
-    return (port == atoi(pattern));
+    return (port == safe_atoi(pattern));
 }
 
 static bool ip_match_wrapper(const char *token, const void *data)
@@ -2673,8 +2736,8 @@ bool ProxyBridge_Start(void)
     // setup iptables rules for packet interception - USE MANGLE table so it runs BEFORE nat
     log_message("setting up iptables rules");
     // mangle table runs before nat, so we can mark packets there
-    int ret1 = system("iptables -t mangle -A OUTPUT -p tcp -j NFQUEUE --queue-num 0");
-    int ret2 = system("iptables -t mangle -A OUTPUT -p udp -j NFQUEUE --queue-num 0");
+    int ret1 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
+    int ret2 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
     
     if (ret1 != 0 || ret2 != 0) {
         log_message("failed to add iptables rules ret1=%d ret2=%d", ret1, ret2);
@@ -2683,8 +2746,8 @@ bool ProxyBridge_Start(void)
     }
     
     // setup nat redirect for marked packets
-    int ret3 = system("iptables -t nat -A OUTPUT -p tcp -m mark --mark 1 -j REDIRECT --to-port 34010");
-    int ret4 = system("iptables -t nat -A OUTPUT -p udp -m mark --mark 2 -j REDIRECT --to-port 34011");
+    int ret3 = run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
+    int ret4 = run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
     if (ret3 != 0 || ret4 != 0) {
         log_message("failed to add nat redirect rules");
     }
@@ -2719,10 +2782,10 @@ bool ProxyBridge_Stop(void)
     running = false;
 
     // cleanup iptables
-    int ret1 = system("iptables -t mangle -D OUTPUT -p tcp -j NFQUEUE --queue-num 0 2>/dev/null");
-    int ret2 = system("iptables -t mangle -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null");
-    int ret3 = system("iptables -t nat -D OUTPUT -p tcp -m mark --mark 1 -j REDIRECT --to-port 34010 2>/dev/null");
-    int ret4 = system("iptables -t nat -D OUTPUT -p udp -m mark --mark 2 -j REDIRECT --to-port 34011 2>/dev/null");
+    int ret1 = run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
+    int ret2 = run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
+    int ret3 = run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
+    int ret4 = run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
     (void)ret1;
     (void)ret2;
     (void)ret3;
@@ -2981,9 +3044,9 @@ static void library_cleanup(void)
     {
         // Even if not running, ensure iptables rules are removed
         // This handles cases where the app crashed before calling Stop
-        (void)!system("iptables -t mangle -D OUTPUT -p tcp -j NFQUEUE --queue-num 0 2>/dev/null");
-        (void)!system("iptables -t mangle -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null");
-        (void)!system("iptables -t nat -D OUTPUT -p tcp -m mark --mark 1 -j REDIRECT --to-port 34010 2>/dev/null");
-        (void)!system("iptables -t nat -D OUTPUT -p udp -m mark --mark 2 -j REDIRECT --to-port 34011 2>/dev/null");
+        run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
+        run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
+        run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
+        run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
     }
 }

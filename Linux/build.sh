@@ -22,9 +22,9 @@ make clean 2>/dev/null || true
 make
 
 if [ -f "libproxybridge.so" ]; then
-    echo "✓ Library build successful"
+    echo "Library build successful"
 else
-    echo "✗ Library build failed!"
+    echo "Library build failed!"
     exit 1
 fi
 echo ""
@@ -36,9 +36,9 @@ make clean 2>/dev/null || true
 make
 
 if [ -f "ProxyBridge" ]; then
-    echo "✓ CLI build successful"
+    echo "CLI build successful"
 else
-    echo "✗ CLI build failed!"
+    echo "CLI build failed!"
     exit 1
 fi
 echo ""
@@ -48,12 +48,16 @@ echo "=== Building GUI ==="
 cd "$SCRIPT_DIR"
 rm -f ProxyBridgeGUI
 if pkg-config --exists gtk+-3.0; then
-    gcc -Wall -Wno-unused-parameter -O3 -Isrc -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -Wformat -Wformat-security -Werror=format-security -fno-strict-overflow -fno-delete-null-pointer-checks -fwrapv -c gui/main.c -o gui_main.o $(pkg-config --cflags gtk+-3.0)
-    gcc -o ProxyBridgeGUI gui_main.o -Lsrc -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack -s -Wl,-rpath,'$ORIGIN/.' -lproxybridge -lpthread $(pkg-config --libs gtk+-3.0) -export-dynamic
+    GUI_CFLAGS="-Wall -Wno-unused-parameter -O3 -Isrc -D_GNU_SOURCE -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -Wformat -Wformat-security -Werror=format-security -fno-strict-overflow -fno-delete-null-pointer-checks -fwrapv $(pkg-config --cflags gtk+-3.0)"
+    GUI_LDFLAGS="-Lsrc -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack -s -Wl,-rpath,'$ORIGIN/.' -lproxybridge -lpthread $(pkg-config --libs gtk+-3.0) -export-dynamic"
+
+    gcc $GUI_CFLAGS -c gui/main.c -o gui_main.o
+    gcc -o ProxyBridgeGUI gui_main.o $GUI_LDFLAGS
+    
     rm -f gui_main.o
-    echo "✓ GUI build successful"
+    echo "GUI build successful"
 else
-    echo "⚠ GTK3 not found. Skipping GUI build."
+    echo "GTK3 not found. Skipping GUI build."
     echo "  Install with: sudo apt install libgtk-3-dev  (Debian/Ubuntu/Mint)"
     echo "                sudo dnf install gtk3-devel    (Fedora)"
 fi
@@ -65,7 +69,7 @@ mv "$SCRIPT_DIR/cli/ProxyBridge" "$OUTPUT_DIR/"
 if [ -f ProxyBridgeGUI ]; then
     mv ProxyBridgeGUI "$OUTPUT_DIR/"
 fi
-echo "✓ Binaries moved to output"
+echo "Binaries moved to output"
 echo ""
 
 # Cleanup build files
@@ -76,7 +80,7 @@ make clean 2>/dev/null || true
 cd "$SCRIPT_DIR/cli"
 rm -f *.o
 make clean 2>/dev/null || true
-echo "✓ Cleanup complete"
+echo "Cleanup complete"
 echo ""
 
 # Show results
