@@ -1181,18 +1181,19 @@ static void on_about(GtkWidget *widget, gpointer data) {
     GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
     gtk_container_set_border_width(GTK_CONTAINER(content_area), 20);
 
-    const char *markup = 
+    char *markup = g_strdup_printf(
         "<span size='xx-large' weight='bold'>ProxyBridge</span>\n"
-        "<span color='gray'>Version 4.0-Beta</span>\n\n"
+        "<span color='gray'>Version %s</span>\n\n"
         "Universal proxy client for Linux applications\n\n"
         "Author: Sourav Kalal / InterceptSuite\n\n"
         "Website: <a href=\"https://interceptsuite.com\">interceptsuite.com</a>\n"
         "GitHub: <a href=\"https://github.com/InterceptSuite/ProxyBridge\">InterceptSuite/ProxyBridge</a>\n\n"
-        "License: MIT";
+        "License: MIT", PROXYBRIDGE_VERSION);
 
     GtkWidget *label = gtk_label_new(NULL);
     gtk_label_set_markup(GTK_LABEL(label), markup);
     gtk_label_set_justify(GTK_LABEL(label), GTK_JUSTIFY_CENTER);
+    g_free(markup);
     
     gtk_box_pack_start(GTK_BOX(content_area), label, TRUE, TRUE, 0);
     gtk_widget_show_all(dialog);
@@ -1296,10 +1297,10 @@ static void on_check_update(GtkWidget *widget, gpointer data) {
     }
     
     // Compare
-    const char *current_ver = "v4.0.0"; 
+    char *current_tag = g_strdup_printf("v%s", PROXYBRIDGE_VERSION);
     
-    if (strcmp(tag_name, current_ver) == 0) {
-         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "You are using the latest version (%s).", current_ver);
+    if (strcmp(tag_name, current_tag) == 0) {
+         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "You are using the latest version (%s).", PROXYBRIDGE_VERSION);
          gtk_dialog_run(GTK_DIALOG(msg));
          gtk_widget_destroy(msg);
     } else {
@@ -1308,7 +1309,7 @@ static void on_check_update(GtkWidget *widget, gpointer data) {
                                             GTK_MESSAGE_QUESTION,
                                             GTK_BUTTONS_NONE,
                                             "New version %s is available!\nCurrent version: %s\n\nDo you want to update now?", 
-                                            tag_name, current_ver);
+                                            tag_name, PROXYBRIDGE_VERSION);
         gtk_dialog_add_button(GTK_DIALOG(dialog), "Download Now", GTK_RESPONSE_ACCEPT);
         gtk_dialog_add_button(GTK_DIALOG(dialog), "Close", GTK_RESPONSE_CANCEL);
         
@@ -1319,6 +1320,7 @@ static void on_check_update(GtkWidget *widget, gpointer data) {
              on_create_update_script_and_run();
         }
     }
+    g_free(current_tag);
     g_free(tag_name);
 }
 
