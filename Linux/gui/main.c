@@ -718,6 +718,194 @@ static void on_rule_select_toggle(GtkToggleButton *btn, gpointer data) {
     }
 }
 
+// --- JSON Helpers ---
+static char *escape_json_string(const char *src) {
+    if (!src) return strdup("");
+    GString *str = g_string_new("");
+    for (const char *p = src; *p; p++) {
+        if (*p == '\\') g_string_append(str, "\\\\");
+        else if (*p == '"') g_string_append(str, "\\\"");
+        else if (*p == '\n') g_string_append(str, "\\n");
+        else g_string_append_c(str, *p);
+    }
+    return g_string_free(str, FALSE);
+}
+
+// Very basic JSON parser for valid input
+static char *extract_sub_json_str(const char *json, const char *key) {
+    char search_key[256];
+    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
+    char *k = strstr(json, search_key);
+    if (!k) return NULL;
+    char *colon = strchr(k, ':');
+    if (!colon) return NULL;
+    char *val_start = strchr(colon, '"');
+    if (!val_start) return NULL;
+    val_start++;
+    char *val_end = strchr(val_start, '"');
+    if (!val_end) return NULL;
+    return g_strndup(val_start, val_end - val_start);
+}
+
+static bool extract_sub_json_bool(const char *json, const char *key) {
+    char search_key[256];
+    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
+    char *k = strstr(json, search_key);
+    if (!k) return false;
+    char *colon = strchr(k, ':');
+    if (!colon) return false;
+    // Skip spaces
+    char *v = colon + 1;
+    while(*v == ' ' || *v == '\t') v++;
+    if (strncmp(v, "true", 4) == 0) return true;
+    return false;
+}
+
+static void on_rule_export_clicked(GtkWidget *widget, gpointer data) {
+    if (!g_rules_list) return;
+    
+    // Check if any selected
+    bool any_selected = false;
+    for (GList *l = g_rules_list; l != NULL; l = l->next) {
+        if (((RuleData *)l->data)->selected) { any_selected = true; break; }
+    }
+    if (!any_selected) {
+        GtkWidget *msg = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "Please select at least one rule to export.");
+        gtk_dialog_run(GTK_DIALOG(msg));
+        gtk_widget_destroy(msg);
+        return;
+    }
+
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Export Rules",
+                                      GTK_WINDOW(window),
+                                      GTK_FILE_CHOOSER_ACTION_SAVE,
+                                      "_Cancel", GTK_RESPONSE_CANCEL,
+                                      "_Save", GTK_RESPONSE_ACCEPT,
+                                      NULL);
+    gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dialog), TRUE);
+    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog), "proxy_rules.json");
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        FILE *f = fopen(filename, "w");
+        if (f) {
+            fprintf(f, "[\n");
+            bool first = true;
+            for (GList *l = g_rules_list; l != NULL; l = l->next) {
+                RuleData *r = (RuleData *)l->data;
+                if (!r->selected) continue;
+                
+                if (!first) fprintf(f, ",\n");
+                char *proc = escape_json_string(r->process_name);
+                char *host = escape_json_string(r->target_hosts);
+                char *port = escape_json_string(r->target_ports);
+                const char *proto = (r->protocol == RULE_PROTOCOL_TCP) ? "TCP" : (r->protocol == RULE_PROTOCOL_UDP ? "UDP" : "BOTH");
+                const char *act = (r->action == RULE_ACTION_PROXY) ? "PROXY" : (r->action == RULE_ACTION_DIRECT ? "DIRECT" : "BLOCK");
+                
+                fprintf(f, "  {\n");
+                fprintf(f, "    \"processNames\": \"%s\",\n", proc);
+                fprintf(f, "    \"targetHosts\": \"%s\",\n", host);
+                fprintf(f, "    \"targetPorts\": \"%s\",\n", port);
+                fprintf(f, "    \"protocol\": \"%s\",\n", proto);
+                fprintf(f, "    \"action\": \"%s\",\n", act);
+                fprintf(f, "    \"enabled\": %s\n", r->enabled ? "true" : "false");
+                fprintf(f, "  }");
+                
+                g_free(proc); g_free(host); g_free(port);
+                first = false;
+            }
+            fprintf(f, "\n]\n");
+            fclose(f);
+            
+            GtkWidget *msg = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "Rules exported successfully.");
+            gtk_dialog_run(GTK_DIALOG(msg));
+            gtk_widget_destroy(msg);
+        }
+        g_free(filename);
+    }
+    gtk_widget_destroy(dialog);
+}
+
+static void on_rule_import_clicked(GtkWidget *widget, gpointer data) {
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Import Rules",
+                                      GTK_WINDOW(window),
+                                      GTK_FILE_CHOOSER_ACTION_OPEN,
+                                      "_Cancel", GTK_RESPONSE_CANCEL,
+                                      "_Open", GTK_RESPONSE_ACCEPT,
+                                      NULL);
+                                      
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        char *content = NULL;
+        gsize len;
+        
+        if (g_file_get_contents(filename, &content, &len, NULL)) {
+            // Simple robust scan: look for { ... } blocks
+            char *curr = content;
+            int imported = 0;
+            while ((curr = strchr(curr, '{')) != NULL) {
+                char *end = strchr(curr, '}');
+                if (!end) break;
+                
+                // Temp terminate to limit search scope
+                char saved = *end;
+                *end = '\0';
+                
+                // Parse
+                char *proc = extract_sub_json_str(curr, "processNames");
+                char *host = extract_sub_json_str(curr, "targetHosts");
+                char *port = extract_sub_json_str(curr, "targetPorts");
+                char *proto_s = extract_sub_json_str(curr, "protocol");
+                char *act_s = extract_sub_json_str(curr, "action");
+                bool en = extract_sub_json_bool(curr, "enabled");
+                
+                if (proc && host && port && proto_s && act_s) {
+                    RuleProtocol p = RULE_PROTOCOL_BOTH;
+                    if (strcmp(proto_s, "TCP") == 0) p = RULE_PROTOCOL_TCP;
+                    else if (strcmp(proto_s, "UDP") == 0) p = RULE_PROTOCOL_UDP;
+                    
+                    RuleAction a = RULE_ACTION_PROXY;
+                    if (strcmp(act_s, "DIRECT") == 0) a = RULE_ACTION_DIRECT;
+                    else if (strcmp(act_s, "BLOCK") == 0) a = RULE_ACTION_BLOCK;
+                    
+                    uint32_t nid = ProxyBridge_AddRule(proc, host, port, p, a);
+                    // Update enabled if needed (AddRule creates enabled by default, but check ID)
+                     if (!en) ProxyBridge_DisableRule(nid);
+                    
+                    // Add to UI list struct
+                    RuleData *nd = malloc(sizeof(RuleData));
+                    nd->id = nid;
+                    nd->process_name = strdup(proc);
+                    nd->target_hosts = strdup(host);
+                    nd->target_ports = strdup(port);
+                    nd->protocol = p;
+                    nd->action = a;
+                    nd->enabled = en;
+                    nd->selected = false;
+                    
+                    g_rules_list = g_list_append(g_rules_list, nd);
+                    imported++;
+                }
+                
+                g_free(proc); g_free(host); g_free(port); g_free(proto_s); g_free(act_s);
+                
+                *end = saved; // Restore
+                curr = end + 1;
+            }
+            g_free(content);
+            
+            if (imported > 0) {
+                 refresh_rules_ui();
+                 GtkWidget *msg = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "Imported %d rules.", imported);
+                 gtk_dialog_run(GTK_DIALOG(msg));
+                 gtk_widget_destroy(msg);
+            }
+        }
+        g_free(filename);
+    }
+    gtk_widget_destroy(dialog);
+}
+
 static void on_bulk_delete_clicked(GtkWidget *widget, gpointer data) {
     if (!g_rules_list) return;
 
@@ -924,6 +1112,13 @@ static void on_proxy_rules_clicked(GtkWidget *widget, gpointer data) {
     GtkWidget *del_all_btn = gtk_button_new_with_label("Delete Selected");
     g_signal_connect(del_all_btn, "clicked", G_CALLBACK(on_bulk_delete_clicked), NULL);
 
+    // Import/Export Buttons
+    GtkWidget *import_btn = gtk_button_new_with_label("Import");
+    g_signal_connect(import_btn, "clicked", G_CALLBACK(on_rule_import_clicked), NULL);
+    
+    GtkWidget *export_btn = gtk_button_new_with_label("Export");
+    g_signal_connect(export_btn, "clicked", G_CALLBACK(on_rule_export_clicked), NULL);
+
     gtk_box_pack_start(GTK_BOX(header_box), title, FALSE, FALSE, 0);
     
     // Spacing
@@ -931,10 +1126,12 @@ static void on_proxy_rules_clicked(GtkWidget *widget, gpointer data) {
     gtk_widget_set_hexpand(spacer, TRUE);
     gtk_box_pack_start(GTK_BOX(header_box), spacer, TRUE, TRUE, 0);
 
-    // Buttons
+    // Buttons (Packed End = Right to Left order on screen)
     gtk_box_pack_end(GTK_BOX(header_box), add_btn, FALSE, FALSE, 5);
     gtk_box_pack_end(GTK_BOX(header_box), btn_select_all_header, FALSE, FALSE, 5);
     gtk_box_pack_end(GTK_BOX(header_box), del_all_btn, FALSE, FALSE, 5);
+    gtk_box_pack_end(GTK_BOX(header_box), export_btn, FALSE, FALSE, 5);
+    gtk_box_pack_end(GTK_BOX(header_box), import_btn, FALSE, FALSE, 5);
     
     gtk_box_pack_start(GTK_BOX(vbox), header_box, FALSE, FALSE, 0);
     
@@ -989,6 +1186,10 @@ int main(int argc, char *argv[]) {
         gtk_dialog_run(GTK_DIALOG(dialog));
         return 1;
     }
+
+    // Force GSettings backend to 'memory' to prevent dconf/dbus-launch errors when running as root
+    // This suppresses "failed to commit changes to dconf" warnings.
+    setenv("GSETTINGS_BACKEND", "memory", 1);
 
     gtk_init(&argc, &argv);
 
