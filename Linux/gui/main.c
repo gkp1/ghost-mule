@@ -58,6 +58,7 @@ typedef struct {
     RuleProtocol protocol;
     RuleAction action;
     bool enabled;
+    bool selected;
 } RuleData;
 
 static GList *g_rules_list = NULL;
@@ -534,6 +535,7 @@ static void on_save_rule(GtkWidget *widget, gpointer data) {
         new_rule->protocol = proto;
         new_rule->action = action;
         new_rule->enabled = true; // Default enabled
+        new_rule->selected = false;
         
         g_rules_list = g_list_append(g_rules_list, new_rule);
     }
@@ -693,6 +695,80 @@ static void on_rule_add_clicked(GtkWidget *widget, gpointer data) {
     open_rule_dialog(NULL);
 }
 
+static GtkWidget *btn_select_all_header = NULL; // Renamed to separate from any local vars
+
+// Note: rules_list_box is already defined at top of file, so we just use it
+static void refresh_rules_ui(); // Forward decl
+
+static void on_rule_select_toggle(GtkToggleButton *btn, gpointer data) {
+    RuleData *rule = (RuleData *)data;
+    rule->selected = gtk_toggle_button_get_active(btn);
+    // Refresh only the Select All button label
+    if (btn_select_all_header) {
+         bool all_selected = (g_rules_list != NULL);
+         if (g_rules_list == NULL) all_selected = false;
+         for (GList *l = g_rules_list; l != NULL; l = l->next) {
+            RuleData *r = (RuleData *)l->data;
+            if (!r->selected) {
+                all_selected = false;
+                break;
+            }
+        }
+        gtk_button_set_label(GTK_BUTTON(btn_select_all_header), all_selected ? "Deselect All" : "Select All");
+    }
+}
+
+static void on_bulk_delete_clicked(GtkWidget *widget, gpointer data) {
+    if (!g_rules_list) return;
+
+    GList *iter = g_rules_list;
+    // Collect to-delete items first
+    GList *to_delete = NULL;
+    
+    while (iter != NULL) {
+        RuleData *rule = (RuleData *)iter->data;
+        if (rule->selected) {
+            to_delete = g_list_append(to_delete, rule);
+        }
+        iter = iter->next;
+    }
+
+    if (!to_delete) return; // Nothing to delete
+
+    // Delete them
+    for (GList *d = to_delete; d != NULL; d = d->next) {
+        RuleData *rule = (RuleData *)d->data;
+        ProxyBridge_DeleteRule(rule->id);
+        g_rules_list = g_list_remove(g_rules_list, rule);
+        free_rule_data(rule);
+    }
+    g_list_free(to_delete);
+    
+    refresh_rules_ui();
+}
+
+static void on_select_all_clicked(GtkWidget *widget, gpointer data) {
+    if (!g_rules_list) return;
+    
+    // Check if currently all selected
+    bool all_selected = true;
+    for (GList *l = g_rules_list; l != NULL; l = l->next) {
+        RuleData *r = (RuleData *)l->data;
+        if (!r->selected) {
+            all_selected = false;
+            break;
+        }
+    }
+    
+    bool new_state = !all_selected; // Toggle
+    
+    for (GList *l = g_rules_list; l != NULL; l = l->next) {
+        RuleData *r = (RuleData *)l->data;
+        r->selected = new_state;
+    }
+    refresh_rules_ui();
+}
+
 static void refresh_rules_ui() {
     if (!rules_list_box) return;
     
@@ -702,6 +778,21 @@ static void refresh_rules_ui() {
     for(iter = children; iter != NULL; iter = g_list_next(iter))
         gtk_widget_destroy(GTK_WIDGET(iter->data));
     g_list_free(children);
+
+    // Check All status for button label
+    if (btn_select_all_header) {
+        bool all_selected = (g_rules_list != NULL);
+        if (g_rules_list == NULL) all_selected = false;
+        
+        for (GList *l = g_rules_list; l != NULL; l = l->next) {
+            RuleData *r = (RuleData *)l->data;
+            if (!r->selected) {
+                all_selected = false;
+                break;
+            }
+        }
+        gtk_button_set_label(GTK_BUTTON(btn_select_all_header), all_selected ? "Deselect All" : "Select All");
+    }
     
     // Use GtkGrid for alignment
     GtkWidget *grid = gtk_grid_new();
@@ -710,33 +801,35 @@ static void refresh_rules_ui() {
     gtk_container_add(GTK_CONTAINER(rules_list_box), grid);
 
     // Headers
-    // Col 0: Enabled (small)
-    // Col 1: Actions (medium)
-    // Col 2: SR (small)
-    // Col 3: Process (expand)
-    // Col 4: Host (expand)
-    // Col 5: Protocol (fixed)
-    // Col 6: Action (fixed)
+    // Col 0: Select (new)
+    // Col 1: Enabled
+    // Col 2: Actions
+    // Col 3: SR
+    // Col 4: Process
+    // Col 5: Host
+    // Col 6: Protocol
+    // Col 7: Action
     
     int row = 0;
-    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("En"), 0, row, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Actions"), 1, row, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("SR"), 2, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("  "), 0, row, 1, 1); // Selection Header
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Enable"), 1, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Actions"), 2, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("SR"), 3, row, 1, 1);
     
     GtkWidget *h_proc = gtk_label_new("Process"); gtk_widget_set_halign(h_proc, GTK_ALIGN_START);
     gtk_widget_set_hexpand(h_proc, TRUE);
-    gtk_grid_attach(GTK_GRID(grid), h_proc, 3, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), h_proc, 4, row, 1, 1);
     
     GtkWidget *h_host = gtk_label_new("Target Hosts"); gtk_widget_set_halign(h_host, GTK_ALIGN_START);
     gtk_widget_set_hexpand(h_host, TRUE);
-    gtk_grid_attach(GTK_GRID(grid), h_host, 4, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), h_host, 5, row, 1, 1);
     
-    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Protocol"), 5, row, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Action"), 6, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Protocol"), 6, row, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Action"), 7, row, 1, 1);
     
     // Separator
     row++;
-    gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row, 7, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row, 8, 1);
     row++;
 
     // Data Rows
@@ -744,11 +837,17 @@ static void refresh_rules_ui() {
     for (GList *l = g_rules_list; l != NULL; l = l->next) {
         RuleData *r = (RuleData *)l->data;
         
+        // Select Checkbox
+        GtkWidget *chk_sel = gtk_check_button_new();
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(chk_sel), r->selected);
+        g_signal_connect(chk_sel, "toggled", G_CALLBACK(on_rule_select_toggle), r);
+        gtk_grid_attach(GTK_GRID(grid), chk_sel, 0, row, 1, 1);
+
         // Enabled
         GtkWidget *chk = gtk_check_button_new();
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(chk), r->enabled);
         g_signal_connect(chk, "toggled", G_CALLBACK(on_rule_toggle), r);
-        gtk_grid_attach(GTK_GRID(grid), chk, 0, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), chk, 1, row, 1, 1);
         
         // Actions
         GtkWidget *act_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
@@ -758,27 +857,27 @@ static void refresh_rules_ui() {
         g_signal_connect(btn_del, "clicked", G_CALLBACK(on_rule_delete), r);
         gtk_box_pack_start(GTK_BOX(act_box), btn_edit, FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(act_box), btn_del, FALSE, FALSE, 0);
-        gtk_grid_attach(GTK_GRID(grid), act_box, 1, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), act_box, 2, row, 1, 1);
         
         // SR
         char sr_str[8]; sprintf(sr_str, "%d", sr_counter++);
-        gtk_grid_attach(GTK_GRID(grid), gtk_label_new(sr_str), 2, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), gtk_label_new(sr_str), 3, row, 1, 1);
         
         // Process
         GtkWidget *l_proc = gtk_label_new(r->process_name); 
         gtk_widget_set_halign(l_proc, GTK_ALIGN_START);
         gtk_label_set_ellipsize(GTK_LABEL(l_proc), PANGO_ELLIPSIZE_END);
-        gtk_grid_attach(GTK_GRID(grid), l_proc, 3, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), l_proc, 4, row, 1, 1);
         
         // Host
         GtkWidget *l_host = gtk_label_new(r->target_hosts); 
         gtk_widget_set_halign(l_host, GTK_ALIGN_START);
         gtk_label_set_ellipsize(GTK_LABEL(l_host), PANGO_ELLIPSIZE_END);
-        gtk_grid_attach(GTK_GRID(grid), l_host, 4, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), l_host, 5, row, 1, 1);
         
         // Protocol
         const char* proto_strs[] = {"TCP", "UDP", "BOTH"};
-        gtk_grid_attach(GTK_GRID(grid), gtk_label_new(proto_strs[r->protocol]), 5, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), gtk_label_new(proto_strs[r->protocol]), 6, row, 1, 1);
         
         // Action
         const char* action_strs[] = {"PROXY", "DIRECT", "BLOCK"};
@@ -786,13 +885,13 @@ static void refresh_rules_ui() {
         // Set Color
         GtkStyleContext *context = gtk_widget_get_style_context(l_act);
         if (r->action == RULE_ACTION_PROXY) gtk_style_context_add_class(context, "success");
-        else if (r->action == RULE_ACTION_BLOCK) gtk_style_context_add_class(context, "error");
+        else if (r->action == RULE_ACTION_DIRECT) gtk_style_context_add_class(context, "info");
         else gtk_style_context_add_class(context, "warning");
         
-        gtk_grid_attach(GTK_GRID(grid), l_act, 6, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), l_act, 7, row, 1, 1);
         
         row++;
-        gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row, 7, 1);
+        gtk_grid_attach(GTK_GRID(grid), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), 0, row, 8, 1);
         row++;
     }
     
@@ -817,8 +916,26 @@ static void on_proxy_rules_clicked(GtkWidget *widget, gpointer data) {
     GtkWidget *add_btn = gtk_button_new_with_label("+ Add Rule");
     g_signal_connect(add_btn, "clicked", G_CALLBACK(on_rule_add_clicked), NULL);
     
+    // Select All Button
+    btn_select_all_header = gtk_button_new_with_label("Select All");
+    g_signal_connect(btn_select_all_header, "clicked", G_CALLBACK(on_select_all_clicked), NULL);
+
+    // Bulk Delete Button
+    GtkWidget *del_all_btn = gtk_button_new_with_label("Delete Selected");
+    g_signal_connect(del_all_btn, "clicked", G_CALLBACK(on_bulk_delete_clicked), NULL);
+
     gtk_box_pack_start(GTK_BOX(header_box), title, FALSE, FALSE, 0);
-    gtk_box_pack_end(GTK_BOX(header_box), add_btn, FALSE, FALSE, 0);
+    
+    // Spacing
+    GtkWidget *spacer = gtk_label_new("");
+    gtk_widget_set_hexpand(spacer, TRUE);
+    gtk_box_pack_start(GTK_BOX(header_box), spacer, TRUE, TRUE, 0);
+
+    // Buttons
+    gtk_box_pack_end(GTK_BOX(header_box), add_btn, FALSE, FALSE, 5);
+    gtk_box_pack_end(GTK_BOX(header_box), btn_select_all_header, FALSE, FALSE, 5);
+    gtk_box_pack_end(GTK_BOX(header_box), del_all_btn, FALSE, FALSE, 5);
+    
     gtk_box_pack_start(GTK_BOX(vbox), header_box, FALSE, FALSE, 0);
     
     // Rules List Area
