@@ -17,15 +17,21 @@ char g_proxy_user[256] = "";
 char g_proxy_pass[256] = "";
 
 GList *g_rules_list = NULL;
+bool g_chk_logging = true;
+bool g_chk_dns = true;
 
 static void on_log_traffic_toggled(GtkCheckMenuItem *item, gpointer data) {
     bool active = gtk_check_menu_item_get_active(item);
     ProxyBridge_SetTrafficLoggingEnabled(active);
+    g_chk_logging = active;
+    save_config();
 }
 
 static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
     bool active = gtk_check_menu_item_get_active(item);
     ProxyBridge_SetDnsViaProxy(active);
+    g_chk_dns = active;
+    save_config();
 }
 
 static void on_create_update_script_and_run() {
@@ -119,6 +125,10 @@ int main(int argc, char *argv[]) {
 
     if (getuid() != 0) { gtk_init(&argc, &argv); show_message(NULL, GTK_MESSAGE_ERROR, "ProxyBridge must be run as root (sudo)."); return 1; }
     setenv("GSETTINGS_BACKEND", "memory", 1);
+    
+    // load saved config
+    load_config();
+    
     gtk_init(&argc, &argv);
 
     GtkSettings *settings = gtk_settings_get_default();
@@ -140,11 +150,11 @@ int main(int argc, char *argv[]) {
     GtkWidget *rules_item = gtk_menu_item_new_with_label("Proxy Rules");
     
     GtkWidget *log_check_item = gtk_check_menu_item_new_with_label("Enable Traffic Logging");
-    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_check_item), TRUE); 
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_check_item), g_chk_logging); 
     g_signal_connect(log_check_item, "toggled", G_CALLBACK(on_log_traffic_toggled), NULL);
 
     GtkWidget *dns_check_item = gtk_check_menu_item_new_with_label("DNS via Proxy");
-    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_check_item), TRUE); 
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_check_item), g_chk_dns); 
     g_signal_connect(dns_check_item, "toggled", G_CALLBACK(on_dns_proxy_toggled), NULL);
 
     GtkWidget *exit_item = gtk_menu_item_new_with_label("Exit");
@@ -232,10 +242,21 @@ int main(int argc, char *argv[]) {
     // start it up
     ProxyBridge_SetLogCallback(lib_log_callback);
     ProxyBridge_SetConnectionCallback(lib_connection_callback);
-    ProxyBridge_SetTrafficLoggingEnabled(true);
+    ProxyBridge_SetTrafficLoggingEnabled(g_chk_logging);
+    ProxyBridge_SetDnsViaProxy(g_chk_dns);
     
     if (ProxyBridge_Start()) {
-        gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "ProxyBridge Service Started. Please configure proxy settings.");
+        // apply config
+        ProxyBridge_SetProxyConfig(g_proxy_type, g_proxy_ip, g_proxy_port, g_proxy_user, g_proxy_pass);
+        
+        // restore rules
+        for (GList *l = g_rules_list; l != NULL; l = l->next) {
+            RuleData *r = (RuleData *)l->data;
+            r->id = ProxyBridge_AddRule(r->process_name, r->target_hosts, r->target_ports, r->protocol, r->action);
+            if (!r->enabled) ProxyBridge_DisableRule(r->id);
+        }
+
+        gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "ProxyBridge Service Started.");
     } else {
         gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "Failed to start ProxyBridge engine.");
     }

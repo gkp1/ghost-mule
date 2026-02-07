@@ -75,6 +75,8 @@ extern char g_proxy_user[256];
 extern char g_proxy_pass[256];
 
 extern GList *g_rules_list;
+extern bool g_chk_logging;
+extern bool g_chk_dns;
 
 long safe_strtol(const char *nptr);
 void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...);
@@ -83,6 +85,10 @@ char* get_current_time_str();
 char *escape_json_string(const char *src);
 char *extract_sub_json_str(const char *json, const char *key);
 bool extract_sub_json_bool(const char *json, const char *key);
+
+// config storage
+void save_config();
+void load_config();
 
 // settings
 void on_proxy_configure(GtkWidget *widget, gpointer data);

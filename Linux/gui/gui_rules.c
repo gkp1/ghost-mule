@@ -20,6 +20,7 @@ static void on_rule_delete(GtkWidget *widget, gpointer data) {
     ProxyBridge_DeleteRule(rule->id);
     g_rules_list = g_list_remove(g_rules_list, rule);
     free_rule_data(rule);
+    save_config();
     refresh_rules_ui();
 }
 
@@ -28,6 +29,7 @@ static void on_rule_toggle(GtkToggleButton *btn, gpointer data) {
     rule->enabled = gtk_toggle_button_get_active(btn);
     if (rule->enabled) ProxyBridge_EnableRule(rule->id);
     else ProxyBridge_DisableRule(rule->id);
+    save_config();
 }
 
 static void on_save_rule(GtkWidget *widget, gpointer data) {
@@ -66,6 +68,7 @@ static void on_save_rule(GtkWidget *widget, gpointer data) {
         new_rule->selected = false;
         g_rules_list = g_list_append(g_rules_list, new_rule);
     }
+    save_config();
     refresh_rules_ui();
     gtk_widget_destroy(dialog);
     free(widgets);

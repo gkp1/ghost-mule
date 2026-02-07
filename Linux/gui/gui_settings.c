@@ -209,6 +209,8 @@ void on_proxy_configure(GtkWidget *widget, gpointer data) {
 
         ProxyBridge_SetProxyConfig(g_proxy_type, g_proxy_ip, g_proxy_port, g_proxy_user, g_proxy_pass);
         
+        save_config();
+
         char status_msg[512];
         snprintf(status_msg, sizeof(status_msg), "Configuration updated: %s:%d", g_proxy_ip, g_proxy_port);
         gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, status_msg);
