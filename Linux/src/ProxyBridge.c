@@ -1771,7 +1771,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
             action = RULE_ACTION_DIRECT;
 
         // log connection (skip our own process)
-        if (g_connection_callback != NULL && (tcph->syn && !tcph->ack) && pid > 0 && pid != g_current_process_id)
+        if (g_traffic_logging_enabled && g_connection_callback != NULL && (tcph->syn && !tcph->ack) && pid > 0 && pid != g_current_process_id)
         {
             char process_name[MAX_PROCESS_NAME];
             if (get_process_name_from_pid(pid, process_name, sizeof(process_name)))
@@ -1799,11 +1799,8 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
 
                     const char* display_name = extract_filename(process_name);
                     g_connection_callback(display_name, pid, dest_ip_str, dest_port, proxy_info);
-
-                    if (g_traffic_logging_enabled)
-                    {
-                        add_logged_connection(pid, dest_ip, dest_port, action);
-                    }
+                    
+                    add_logged_connection(pid, dest_ip, dest_port, action);
                 }
             }
         }
@@ -1853,7 +1850,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
             action = RULE_ACTION_DIRECT;
 
         // log (skip our own process, log even without PID for ephemeral UDP sockets)
-        if (g_connection_callback != NULL && pid != g_current_process_id)
+        if (g_traffic_logging_enabled && g_connection_callback != NULL && pid != g_current_process_id)
         {
             char process_name[MAX_PROCESS_NAME];
             uint32_t log_pid = (pid == 0) ? 1 : pid;  // Use PID 1 for unknown processes
@@ -1890,11 +1887,8 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
 
                     const char* display_name = extract_filename(process_name);
                     g_connection_callback(display_name, log_pid, dest_ip_str, dest_port, proxy_info);
-
-                    if (g_traffic_logging_enabled)
-                    {
-                        add_logged_connection(log_pid, dest_ip, dest_port, action);
-                    }
+                    
+                    add_logged_connection(log_pid, dest_ip, dest_port, action);
                 }
         }
 

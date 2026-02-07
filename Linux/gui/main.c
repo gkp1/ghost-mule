@@ -1,3 +1,4 @@
+#include <unistd.h>
 #include <gtk/gtk.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -1147,14 +1148,126 @@ static void on_proxy_rules_clicked(GtkWidget *widget, gpointer data) {
     gtk_widget_show_all(dialog);
 }
 
+static void on_log_traffic_toggled(GtkCheckMenuItem *item, gpointer data) {
+    bool active = gtk_check_menu_item_get_active(item);
+    ProxyBridge_SetTrafficLoggingEnabled(active);
+}
+
+static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
+    bool active = gtk_check_menu_item_get_active(item);
+    ProxyBridge_SetDnsViaProxy(active);
+}
+
 static void on_about(GtkWidget *widget, gpointer data) {
-    GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
-                                           GTK_DIALOG_DESTROY_WITH_PARENT,
-                                           GTK_MESSAGE_INFO,
-                                           GTK_BUTTONS_OK,
-                                           "ProxyBridge Linux GUI\nVersion 4.0-Beta\n\nHigh-performance zero-copy proxy client.");
+    GtkWidget *dialog = gtk_dialog_new_with_buttons("About ProxyBridge",
+                                                    GTK_WINDOW(window),
+                                                    GTK_DIALOG_DESTROY_WITH_PARENT | GTK_DIALOG_MODAL,
+                                                    "OK", GTK_RESPONSE_OK,
+                                                    NULL);
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 400, 300);
+    
+    GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    gtk_container_set_border_width(GTK_CONTAINER(content_area), 20);
+
+    const char *markup = 
+        "<span size='xx-large' weight='bold'>ProxyBridge</span>\n"
+        "<span color='gray'>Version 4.0-Beta</span>\n\n"
+        "Universal proxy client for Linux applications\n\n"
+        "Author: Sourav Kalal / InterceptSuite\n\n"
+        "Website: <a href=\"https://interceptsuite.com\">interceptsuite.com</a>\n"
+        "GitHub: <a href=\"https://github.com/InterceptSuite/ProxyBridge\">InterceptSuite/ProxyBridge</a>\n\n"
+        "License: MIT";
+
+    GtkWidget *label = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(label), markup);
+    gtk_label_set_justify(GTK_LABEL(label), GTK_JUSTIFY_CENTER);
+    
+    gtk_box_pack_start(GTK_BOX(content_area), label, TRUE, TRUE, 0);
+    gtk_widget_show_all(dialog);
+    
     gtk_dialog_run(GTK_DIALOG(dialog));
     gtk_widget_destroy(dialog);
+}
+
+static void on_create_update_script_and_run() {
+    // We use execl to replace the current process, so we must stop everything first
+    ProxyBridge_Stop();
+    
+    const char *script_url = "https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh";
+    const char *script_path = "/tmp/proxybridge_deploy.sh";
+    
+    char dl_cmd[512];
+    snprintf(dl_cmd, sizeof(dl_cmd), "curl -s -o %s %s && chmod +x %s", script_path, script_url, script_path);
+    
+    if (system(dl_cmd) != 0) {
+        // This likely won't be seen if we are shutting down, but worth a try (or stderr)
+        fprintf(stderr, "Failed to download update script.\n");
+        exit(1);
+    }
+    
+    // Replace process with the update script
+    execl("/bin/bash", "bash", script_path, NULL);
+    exit(0); // Should not reach here
+}
+
+static void on_check_update(GtkWidget *widget, gpointer data) {
+    const char *url = "https://api.github.com/repos/InterceptSuite/ProxyBridge/releases/latest";
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "curl -s -H \"User-Agent: ProxyBridge-Linux\" %s", url);
+    
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to contact update server.");
+         gtk_dialog_run(GTK_DIALOG(msg));
+         gtk_widget_destroy(msg);
+         return;
+    }
+    
+    char buffer[4096];
+    size_t n = fread(buffer, 1, sizeof(buffer)-1, fp);
+    buffer[n] = 0;
+    pclose(fp);
+    
+    if (n == 0) {
+         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Empty response from update server.");
+         gtk_dialog_run(GTK_DIALOG(msg));
+         gtk_widget_destroy(msg);
+         return;
+    }
+    
+    char *tag_name = extract_sub_json_str(buffer, "tag_name");
+    if (!tag_name) {
+         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "Could not parse version info.\nResponse might be rate limited.");
+         gtk_dialog_run(GTK_DIALOG(msg));
+         gtk_widget_destroy(msg);
+         return;
+    }
+    
+    // Compare
+    const char *current_ver = "v4.0.0"; 
+    
+    if (strcmp(tag_name, current_ver) == 0) {
+         GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "You are using the latest version (%s).", current_ver);
+         gtk_dialog_run(GTK_DIALOG(msg));
+         gtk_widget_destroy(msg);
+    } else {
+        GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
+                                            GTK_DIALOG_DESTROY_WITH_PARENT,
+                                            GTK_MESSAGE_QUESTION,
+                                            GTK_BUTTONS_NONE,
+                                            "New version %s is available!\nCurrent version: %s\n\nDo you want to update now?", 
+                                            tag_name, current_ver);
+        gtk_dialog_add_button(GTK_DIALOG(dialog), "Download Now", GTK_RESPONSE_ACCEPT);
+        gtk_dialog_add_button(GTK_DIALOG(dialog), "Close", GTK_RESPONSE_CANCEL);
+        
+        int resp = gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        
+        if (resp == GTK_RESPONSE_ACCEPT) {
+             on_create_update_script_and_run();
+        }
+    }
+    g_free(tag_name);
 }
 
 static void signal_handler(int sig) {
@@ -1214,6 +1327,16 @@ int main(int argc, char *argv[]) {
     GtkWidget *proxy_menu = gtk_menu_new();
     GtkWidget *config_item = gtk_menu_item_new_with_label("Proxy Settings");
     GtkWidget *rules_item = gtk_menu_item_new_with_label("Proxy Rules");
+    
+    // New Check Menu Items
+    GtkWidget *log_check_item = gtk_check_menu_item_new_with_label("Enable Traffic Logging");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_check_item), TRUE); // Default
+    g_signal_connect(log_check_item, "toggled", G_CALLBACK(on_log_traffic_toggled), NULL);
+
+    GtkWidget *dns_check_item = gtk_check_menu_item_new_with_label("DNS via Proxy");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_check_item), TRUE); // Default
+    g_signal_connect(dns_check_item, "toggled", G_CALLBACK(on_dns_proxy_toggled), NULL);
+
     GtkWidget *exit_item = gtk_menu_item_new_with_label("Exit");
     
     g_signal_connect(config_item, "activate", G_CALLBACK(on_proxy_configure), NULL);
@@ -1223,11 +1346,25 @@ int main(int argc, char *argv[]) {
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), config_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), rules_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), gtk_separator_menu_item_new());
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), log_check_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), dns_check_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), gtk_separator_menu_item_new());
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), exit_item);
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(proxy_menu_item), proxy_menu);
     
     GtkWidget *about_menu_item = gtk_menu_item_new_with_label("About");
-    g_signal_connect(about_menu_item, "activate", G_CALLBACK(on_about), NULL);
+    GtkWidget *about_menu = gtk_menu_new();
+    
+    GtkWidget *about_child_item = gtk_menu_item_new_with_label("About");
+    g_signal_connect(about_child_item, "activate", G_CALLBACK(on_about), NULL);
+    
+    GtkWidget *update_item = gtk_menu_item_new_with_label("Check for Updates");
+    g_signal_connect(update_item, "activate", G_CALLBACK(on_check_update), NULL);
+    
+    gtk_menu_shell_append(GTK_MENU_SHELL(about_menu), about_child_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(about_menu), update_item);
+    
+    gtk_menu_item_set_submenu(GTK_MENU_ITEM(about_menu_item), about_menu);
 
     gtk_menu_shell_append(GTK_MENU_SHELL(menubar), proxy_menu_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(menubar), about_menu_item);
