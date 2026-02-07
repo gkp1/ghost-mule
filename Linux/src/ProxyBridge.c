@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
@@ -64,17 +65,6 @@ typedef struct CONNECTION_INFO {
     struct CONNECTION_INFO *next;
 } CONNECTION_INFO;
 
-typedef struct {
-    int client_socket;
-    uint32_t orig_dest_ip;
-    uint16_t orig_dest_port;
-} CONNECTION_CONFIG;
-
-typedef struct {
-    int from_socket;
-    int to_socket;
-} TRANSFER_CONFIG;
-
 typedef struct LOGGED_CONNECTION {
     uint32_t pid;
     uint32_t dest_ip;
@@ -97,6 +87,7 @@ static LOGGED_CONNECTION *logged_connections = NULL;
 static PROCESS_RULE *rules_list = NULL;
 static uint32_t g_next_rule_id = 1;
 static pthread_rwlock_t conn_lock = PTHREAD_RWLOCK_INITIALIZER;   // read-heavy connection hash
+static pthread_rwlock_t rules_lock = PTHREAD_RWLOCK_INITIALIZER;  // read-heavy rules list
 static pthread_mutex_t pid_cache_lock = PTHREAD_MUTEX_INITIALIZER; // PID cache only
 static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;       // logged connections only
 
@@ -788,7 +779,9 @@ static RuleAction check_process_rule(uint32_t src_ip, uint16_t src_port, uint32_
     if (!get_process_name_from_pid(pid, process_name, sizeof(process_name)))
         return RULE_ACTION_DIRECT;
 
+    pthread_rwlock_rdlock(&rules_lock);
     RuleAction action = match_rule(process_name, dest_ip, dest_port, is_udp);
+    pthread_rwlock_unlock(&rules_lock);
 
     if (action == RULE_ACTION_PROXY && is_udp && g_proxy_type == PROXY_TYPE_HTTP)
     {
@@ -814,7 +807,7 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
         buf[1] = 0x02;
         buf[2] = SOCKS5_AUTH_NONE;
         buf[3] = 0x02;
-        if (send(s, buf, 4, 0) != 4)
+        if (send(s, buf, 4, MSG_NOSIGNAL) != 4)
         {
             log_message("socks5 failed to send auth methods");
             return -1;
@@ -824,7 +817,7 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
     {
         buf[1] = 0x01;
         buf[2] = SOCKS5_AUTH_NONE;
-        if (send(s, buf, 3, 0) != 3)
+        if (send(s, buf, 3, MSG_NOSIGNAL) != 3)
         {
             log_message("socks5 failed to send auth methods");
             return -1;
@@ -848,7 +841,7 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
         buf[2 + ulen] = (unsigned char)plen;
         memcpy(buf + 3 + ulen, g_proxy_password, plen);
         
-        if (send(s, buf, 3 + ulen + plen, 0) != (ssize_t)(3 + ulen + plen))
+        if (send(s, buf, 3 + ulen + plen, MSG_NOSIGNAL) != (ssize_t)(3 + ulen + plen))
         {
             log_message("socks5 failed to send credentials");
             return -1;
@@ -875,7 +868,7 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
     uint16_t port_net = htons(dest_port);
     memcpy(buf + 8, &port_net, 2);
 
-    if (send(s, buf, 10, 0) != 10)
+    if (send(s, buf, 10, MSG_NOSIGNAL) != 10)
     {
         log_message("socks5 failed to send connect request");
         return -1;
@@ -1046,8 +1039,8 @@ static void* connection_handler(void *arg)
     return NULL;
 }
 
-// High-performance bidirectional relay using splice() for zero-copy transfer.
-// Data moves kernel→kernel through a pipe, never touching userspace memory.
+// bidirectional relay using splice() for zero-copy transfer.
+// data moves from kernel to kernel through a pipe, never touching userspace memory.
 // This eliminates the main throughput bottleneck of copying data through userspace.
 static void* transfer_handler(void *arg)
 {
@@ -1218,18 +1211,24 @@ fallback:
             int ready = poll(fds, 2, 60000);
             if (ready <= 0) break;
 
-            if (fds[0].revents & (POLLERR | POLLHUP | POLLIN)) {
-                if (fds[0].revents & POLLERR) break;
+            if (fds[0].revents & POLLERR || fds[1].revents & POLLERR) break;
+
+            bool did_work = false;
+            if (fds[0].revents & POLLIN) {
                 ssize_t n = recv(sock1, buf, sizeof(buf), MSG_NOSIGNAL);
                 if (n <= 0) break;
                 if (send_all(sock2, buf, n) < 0) break;
+                did_work = true;
             }
-            if (fds[1].revents & (POLLERR | POLLHUP | POLLIN)) {
-                if (fds[1].revents & POLLERR) break;
+            if (fds[1].revents & POLLIN) {
                 ssize_t n = recv(sock2, buf, sizeof(buf), MSG_NOSIGNAL);
                 if (n <= 0) break;
                 if (send_all(sock1, buf, n) < 0) break;
+                did_work = true;
             }
+
+            // POLLHUP with no POLLIN data means peer closed - exit
+            if (!did_work) break;
         }
     }
 
@@ -1347,7 +1346,7 @@ static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
     if (use_auth)
         buf[3] = 0x02;  // username/password auth
     
-    if (send(s, buf, use_auth ? 4 : 3, 0) != (use_auth ? 4 : 3))
+    if (send(s, buf, use_auth ? 4 : 3, MSG_NOSIGNAL) != (use_auth ? 4 : 3))
         return -1;
 
     len = recv(s, buf, 2, 0);
@@ -1364,7 +1363,7 @@ static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
         buf[2 + ulen] = (unsigned char)plen;
         memcpy(buf + 3 + ulen, g_proxy_password, plen);
         
-        if (send(s, buf, 3 + ulen + plen, 0) != (ssize_t)(3 + ulen + plen))
+        if (send(s, buf, 3 + ulen + plen, MSG_NOSIGNAL) != (ssize_t)(3 + ulen + plen))
             return -1;
 
         len = recv(s, buf, 2, 0);
@@ -1382,7 +1381,7 @@ static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
     memset(buf + 4, 0, 4);  // 0.0.0.0
     memset(buf + 8, 0, 2);  // port 0
 
-    if (send(s, buf, 10, 0) != 10)
+    if (send(s, buf, 10, MSG_NOSIGNAL) != 10)
         return -1;
 
     len = recv(s, buf, 512, 0);
@@ -1452,6 +1451,10 @@ static bool establish_udp_associate(void)
         return false;
     }
 
+    // RFC 1928: if server returns 0.0.0.0 as relay address, use the proxy server's IP
+    if (socks5_udp_relay_addr.sin_addr.s_addr == INADDR_ANY)
+        socks5_udp_relay_addr.sin_addr.s_addr = socks5_ip;
+
     socks5_udp_control_socket = tcp_sock;
 
     socks5_udp_send_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -1465,7 +1468,24 @@ static bool establish_udp_associate(void)
     configure_udp_socket(socks5_udp_send_socket, 262144, 30000);
 
     udp_associate_connected = true;
+    log_message("UDP ASSOCIATE established with SOCKS5 proxy");
     return true;
+}
+
+// Tear down UDP associate state so next packet triggers reconnect
+static void teardown_udp_associate(void)
+{
+    udp_associate_connected = false;
+    if (socks5_udp_control_socket >= 0)
+    {
+        close(socks5_udp_control_socket);
+        socks5_udp_control_socket = -1;
+    }
+    if (socks5_udp_send_socket >= 0)
+    {
+        close(socks5_udp_send_socket);
+        socks5_udp_send_socket = -1;
+    }
 }
 
 static void* udp_relay_server(void *arg)
@@ -1496,30 +1516,50 @@ static void* udp_relay_server(void *arg)
         return NULL;
     }
 
+    // Try initial connection (non-fatal if proxy not running yet)
     udp_associate_connected = establish_udp_associate();
 
     while (running)
     {
-        fd_set read_fds;
-        FD_ZERO(&read_fds);
-        FD_SET(udp_relay_socket, &read_fds);
+        struct pollfd fds[3];
+        int nfds = 1;
 
-        int max_fd = udp_relay_socket;
+        // Always monitor the local relay socket for client packets
+        fds[0].fd = udp_relay_socket;
+        fds[0].events = POLLIN;
+        fds[0].revents = 0;
 
-        if (udp_associate_connected && socks5_udp_send_socket >= 0)
-        {
-            FD_SET(socks5_udp_send_socket, &read_fds);
-            if (socks5_udp_send_socket > max_fd)
-                max_fd = socks5_udp_send_socket;
-        }
+        // Monitor SOCKS5 UDP socket for proxy responses
+        fds[1].fd = (udp_associate_connected && socks5_udp_send_socket >= 0) ? socks5_udp_send_socket : -1;
+        fds[1].events = POLLIN;
+        fds[1].revents = 0;
 
-        struct timeval timeout = {1, 0};
+        // Monitor SOCKS5 TCP control socket for death detection (like Windows MSG_PEEK)
+        fds[2].fd = (udp_associate_connected && socks5_udp_control_socket >= 0) ? socks5_udp_control_socket : -1;
+        fds[2].events = POLLIN;
+        fds[2].revents = 0;
+        nfds = 3;
 
-        if (select(max_fd + 1, &read_fds, NULL, NULL, &timeout) <= 0)
+        int ready = poll(fds, nfds, 1000); // 1s timeout
+        if (ready <= 0)
             continue;
 
+        // Check TCP control socket health (Windows-style MSG_PEEK probe)
+        // If the TCP control connection dies, the UDP associate is invalid
+        if (fds[2].fd >= 0 && (fds[2].revents & (POLLIN | POLLHUP | POLLERR)))
+        {
+            char peek_buf[1];
+            ssize_t peek_len = recv(socks5_udp_control_socket, peek_buf, 1, MSG_PEEK | MSG_DONTWAIT);
+            if (peek_len == 0 || (peek_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
+            {
+                // TCP control connection died - proxy is gone
+                teardown_udp_associate();
+                continue;
+            }
+        }
+
         // Client -> SOCKS5 proxy
-        if (FD_ISSET(udp_relay_socket, &read_fds))
+        if (fds[0].revents & POLLIN)
         {
             from_len = sizeof(from_addr);
             ssize_t recv_len = recvfrom(udp_relay_socket, recv_buf, sizeof(recv_buf), 0,
@@ -1527,6 +1567,7 @@ static void* udp_relay_server(void *arg)
             if (recv_len <= 0)
                 continue;
 
+            // Try to establish connection if not connected (proxy may have started)
             if (!udp_associate_connected)
             {
                 if (!establish_udp_associate())
@@ -1538,6 +1579,10 @@ static void* udp_relay_server(void *arg)
             uint16_t dest_port;
 
             if (!get_connection(client_port, &dest_ip, &dest_port))
+                continue;
+
+            // Buffer overflow guard: ensure data + 10-byte SOCKS5 header fits
+            if (recv_len > (ssize_t)(sizeof(send_buf) - 10))
                 continue;
 
             // Build SOCKS5 UDP packet: +----+------+------+----------+----------+----------+
@@ -1552,17 +1597,35 @@ static void* udp_relay_server(void *arg)
             memcpy(send_buf + 8, &port_net, 2);
             memcpy(send_buf + 10, recv_buf, recv_len);
 
-            sendto(socks5_udp_send_socket, send_buf, 10 + recv_len, 0,
+            ssize_t sent = sendto(socks5_udp_send_socket, send_buf, 10 + recv_len, 0,
                    (struct sockaddr *)&socks5_udp_relay_addr, sizeof(socks5_udp_relay_addr));
+
+            // If sendto fails, proxy is dead - tear down and retry on next packet
+            if (sent < 0)
+            {
+                teardown_udp_associate();
+            }
         }
 
         // SOCKS5 proxy -> Client
-        if (udp_associate_connected && socks5_udp_send_socket >= 0 && FD_ISSET(socks5_udp_send_socket, &read_fds))
+        if (fds[1].fd >= 0 && (fds[1].revents & POLLIN))
         {
             from_len = sizeof(from_addr);
             ssize_t recv_len = recvfrom(socks5_udp_send_socket, recv_buf, sizeof(recv_buf), 0,
                                         (struct sockaddr *)&from_addr, &from_len);
+
+            // Handle socket errors - proxy may have died
+            if (recv_len < 0)
+            {
+                if (errno != EAGAIN && errno != EWOULDBLOCK)
+                    teardown_udp_associate();
+                continue;
+            }
             if (recv_len < 10)
+                continue;
+
+            // Fragmented SOCKS5 UDP packets not supported
+            if (recv_buf[2] != 0x00)
                 continue;
 
             // Parse SOCKS5 UDP packet
@@ -1614,12 +1677,15 @@ static void* udp_relay_server(void *arg)
                        (struct sockaddr *)&client_addr, sizeof(client_addr));
             }
         }
+
+        // Handle POLLHUP/POLLERR on the UDP send socket
+        if (fds[1].fd >= 0 && (fds[1].revents & (POLLHUP | POLLERR)))
+        {
+            teardown_udp_associate();
+        }
     }
 
-    if (socks5_udp_control_socket >= 0)
-        close(socks5_udp_control_socket);
-    if (socks5_udp_send_socket >= 0)
-        close(socks5_udp_send_socket);
+    teardown_udp_associate();
     if (udp_relay_socket >= 0)
         close(udp_relay_socket);
 
@@ -1841,6 +1907,9 @@ static void* packet_processor(void *arg)
         rv = recv(fd, buf, sizeof(buf), 0);
         if (rv >= 0)
             nfq_handle_packet(nfq_h, buf, rv);
+        // On error: ENOBUFS = kernel queue full (normal under load),
+        // EINTR = signal, other = transient. Always continue -
+        // stopping the thread would break all network traffic.
     }
 
     return NULL;
@@ -2294,10 +2363,13 @@ uint32_t ProxyBridge_AddRule(const char* process_name, const char* target_hosts,
 
     rule->action = action;
     rule->enabled = true;
+
+    pthread_rwlock_wrlock(&rules_lock);
     rule->next = rules_list;
     rules_list = rule;
-
     update_has_active_rules();
+    pthread_rwlock_unlock(&rules_lock);
+
     log_message("added rule id %u for process %s protocol %d action %d", rule->rule_id, process_name, protocol, action);
 
     return rule->rule_id;
@@ -2308,6 +2380,7 @@ bool ProxyBridge_EnableRule(uint32_t rule_id)
     if (rule_id == 0)
         return false;
 
+    pthread_rwlock_wrlock(&rules_lock);
     PROCESS_RULE *rule = rules_list;
     while (rule != NULL)
     {
@@ -2315,11 +2388,13 @@ bool ProxyBridge_EnableRule(uint32_t rule_id)
         {
             rule->enabled = true;
             update_has_active_rules();
+            pthread_rwlock_unlock(&rules_lock);
             log_message("enabled rule id %u", rule_id);
             return true;
         }
         rule = rule->next;
     }
+    pthread_rwlock_unlock(&rules_lock);
     return false;
 }
 
@@ -2328,6 +2403,7 @@ bool ProxyBridge_DisableRule(uint32_t rule_id)
     if (rule_id == 0)
         return false;
 
+    pthread_rwlock_wrlock(&rules_lock);
     PROCESS_RULE *rule = rules_list;
     while (rule != NULL)
     {
@@ -2335,11 +2411,13 @@ bool ProxyBridge_DisableRule(uint32_t rule_id)
         {
             rule->enabled = false;
             update_has_active_rules();
+            pthread_rwlock_unlock(&rules_lock);
             log_message("disabled rule id %u", rule_id);
             return true;
         }
         rule = rule->next;
     }
+    pthread_rwlock_unlock(&rules_lock);
     return false;
 }
 
@@ -2348,6 +2426,7 @@ bool ProxyBridge_DeleteRule(uint32_t rule_id)
     if (rule_id == 0)
         return false;
 
+    pthread_rwlock_wrlock(&rules_lock);
     PROCESS_RULE *rule = rules_list;
     PROCESS_RULE *prev = NULL;
 
@@ -2360,19 +2439,22 @@ bool ProxyBridge_DeleteRule(uint32_t rule_id)
             else
                 prev->next = rule->next;
 
+            update_has_active_rules();
+            pthread_rwlock_unlock(&rules_lock);
+
             if (rule->target_hosts != NULL)
                 free(rule->target_hosts);
             if (rule->target_ports != NULL)
                 free(rule->target_ports);
             free(rule);
 
-            update_has_active_rules();
             log_message("deleted rule id %u", rule_id);
             return true;
         }
         prev = rule;
         rule = rule->next;
     }
+    pthread_rwlock_unlock(&rules_lock);
     return false;
 }
 
@@ -2381,6 +2463,17 @@ bool ProxyBridge_EditRule(uint32_t rule_id, const char* process_name, const char
     if (rule_id == 0 || process_name == NULL || target_hosts == NULL || target_ports == NULL)
         return false;
 
+    // Pre-allocate new strings before taking lock to minimize hold time
+    char *new_hosts = strdup(target_hosts);
+    char *new_ports = strdup(target_ports);
+    if (new_hosts == NULL || new_ports == NULL)
+    {
+        free(new_hosts);
+        free(new_ports);
+        return false;
+    }
+
+    pthread_rwlock_wrlock(&rules_lock);
     PROCESS_RULE *rule = rules_list;
     while (rule != NULL)
     {
@@ -2389,33 +2482,27 @@ bool ProxyBridge_EditRule(uint32_t rule_id, const char* process_name, const char
             strncpy(rule->process_name, process_name, MAX_PROCESS_NAME - 1);
             rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
 
-            if (rule->target_hosts != NULL)
-                free(rule->target_hosts);
-            rule->target_hosts = strdup(target_hosts);
-            if (rule->target_hosts == NULL)
-            {
-                return false;
-            }
+            free(rule->target_hosts);
+            rule->target_hosts = new_hosts;
 
-            if (rule->target_ports != NULL)
-                free(rule->target_ports);
-            rule->target_ports = strdup(target_ports);
-            if (rule->target_ports == NULL)
-            {
-                free(rule->target_hosts);
-                rule->target_hosts = NULL;
-                return false;
-            }
+            free(rule->target_ports);
+            rule->target_ports = new_ports;
 
             rule->protocol = protocol;
             rule->action = action;
 
             update_has_active_rules();
+            pthread_rwlock_unlock(&rules_lock);
             log_message("updated rule id %u", rule_id);
             return true;
         }
         rule = rule->next;
     }
+    pthread_rwlock_unlock(&rules_lock);
+
+    // Rule not found - free pre-allocated strings
+    free(new_hosts);
+    free(new_ports);
     return false;
 }
 
@@ -2491,6 +2578,9 @@ bool ProxyBridge_Start(void)
     running = true;
     g_current_process_id = getpid();
 
+    // Ignore SIGPIPE - send() on a closed socket must return EPIPE, not kill the process
+    signal(SIGPIPE, SIG_IGN);
+
     // Raise system socket buffer limits for high throughput (requires root)
     // Default rmem_max/wmem_max is usually 208KB, far too small for >100Mbps
     FILE *fp;
@@ -2509,6 +2599,8 @@ bool ProxyBridge_Start(void)
     {
         running = false;
         pthread_cancel(proxy_thread);
+        pthread_join(proxy_thread, NULL);
+        proxy_thread = 0;
         return false;
     }
 
@@ -2525,8 +2617,7 @@ bool ProxyBridge_Start(void)
     if (!nfq_h)
     {
         log_message("nfq_open failed");
-        running = false;
-        return false;
+        goto start_fail;
     }
 
     if (nfq_unbind_pf(nfq_h, AF_INET) < 0)
@@ -2538,8 +2629,8 @@ bool ProxyBridge_Start(void)
     {
         log_message("nfq_bind_pf failed");
         nfq_close(nfq_h);
-        running = false;
-        return false;
+        nfq_h = NULL;
+        goto start_fail;
     }
 
     nfq_qh = nfq_create_queue(nfq_h, 0, &packet_callback, NULL);
@@ -2547,21 +2638,18 @@ bool ProxyBridge_Start(void)
     {
         log_message("nfq_create_queue failed");
         nfq_close(nfq_h);
-        running = false;
-        return false;
+        nfq_h = NULL;
+        goto start_fail;
     }
 
     if (nfq_set_mode(nfq_qh, NFQNL_COPY_PACKET, 0xffff) < 0)
     {
         log_message("nfq_set_mode failed");
         nfq_destroy_queue(nfq_qh);
+        nfq_qh = NULL;
         nfq_close(nfq_h);
-        running = false;
-        pthread_cancel(cleanup_thread);
-        pthread_cancel(proxy_thread);
-        if (udp_relay_thread != 0)
-            pthread_cancel(udp_relay_thread);
-        return false;
+        nfq_h = NULL;
+        goto start_fail;
     }
 
     // Set larger queue length for better performance (16384 like Windows)
@@ -2599,6 +2687,13 @@ bool ProxyBridge_Start(void)
 
     log_message("proxybridge started");
     return true;
+
+start_fail:
+    running = false;
+    if (proxy_thread != 0) { pthread_cancel(proxy_thread); pthread_join(proxy_thread, NULL); proxy_thread = 0; }
+    if (cleanup_thread != 0) { pthread_cancel(cleanup_thread); pthread_join(cleanup_thread, NULL); cleanup_thread = 0; }
+    if (udp_relay_thread != 0) { pthread_cancel(udp_relay_thread); pthread_join(udp_relay_thread, NULL); udp_relay_thread = 0; }
+    return false;
 }
 
 bool ProxyBridge_Stop(void)
@@ -2673,6 +2768,20 @@ bool ProxyBridge_Stop(void)
         }
     }
     pthread_rwlock_unlock(&conn_lock);
+
+    // Free all rules
+    pthread_rwlock_wrlock(&rules_lock);
+    while (rules_list != NULL)
+    {
+        PROCESS_RULE *to_free = rules_list;
+        rules_list = rules_list->next;
+        free(to_free->target_hosts);
+        free(to_free->target_ports);
+        free(to_free);
+    }
+    g_has_active_rules = false;
+    g_next_rule_id = 1;
+    pthread_rwlock_unlock(&rules_lock);
 
     clear_logged_connections();
     clear_pid_cache();

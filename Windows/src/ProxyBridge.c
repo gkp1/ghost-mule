@@ -1469,6 +1469,10 @@ static BOOL establish_udp_associate(void)
         return FALSE;
     }
 
+    // RFC 1928: if server returns 0.0.0.0 as relay address, use the proxy server's IP
+    if (socks5_udp_relay_addr.sin_addr.s_addr == INADDR_ANY)
+        socks5_udp_relay_addr.sin_addr.s_addr = socks5_ip;
+
     socks5_udp_socket = tcp_sock;
 
     // ccreate UDP socket for sending to SOCKS5 proxy
