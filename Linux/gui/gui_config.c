@@ -3,7 +3,7 @@
 #define CONFIG_DIR "/etc/proxybridge"
 #define CONFIG_PATH "/etc/proxybridge/config.ini"
 
-// save settings to file
+// save config
 void save_config() {
     struct stat st = {0};
     if (stat(CONFIG_DIR, &st) == -1) {

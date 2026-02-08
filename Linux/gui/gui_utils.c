@@ -9,7 +9,7 @@ long safe_strtol(const char *nptr) {
     return val;
 }
 
-// show simple popup
+// show popup msg
 void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ...) {
     va_list args;
     va_start(args, format);
@@ -26,7 +26,7 @@ void show_message(GtkWindow *parent, GtkMessageType type, const char *format, ..
     g_free(msg);
 }
 
-// limit log size so it doesnt eat ram
+// keep log size under control so we dont use too much ram
 void trim_buffer_lines(GtkTextBuffer *buffer, int max_lines) {
     if (gtk_text_buffer_get_line_count(buffer) > max_lines) {
         GtkTextIter start, next;

@@ -1,6 +1,6 @@
 #include "gui.h"
 
-// ui widgets
+// widgets
 GtkWidget *window;
 GtkTextView *conn_view;
 GtkTextBuffer *conn_buffer;
@@ -42,15 +42,15 @@ static void on_create_update_script_and_run() {
     if (!tmp_dir) { fprintf(stderr, "Failed to create temp directory for update.\n"); exit(1); }
     char script_path[512];
     snprintf(script_path, sizeof(script_path), "%s/deploy.sh", tmp_dir);
-    
+
     pid_t pid = fork();
-    if (pid == -1) { fprintf(stderr, "Fork failed.\n"); exit(1); } 
-    else if (pid == 0) { execlp("curl", "curl", "-s", "-o", script_path, script_url, NULL); _exit(127); } 
+    if (pid == -1) { fprintf(stderr, "Fork failed.\n"); exit(1); }
+    else if (pid == 0) { execlp("curl", "curl", "-s", "-o", script_path, script_url, NULL); _exit(127); }
     else { int status; waitpid(pid, &status, 0); if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) { fprintf(stderr, "Failed to download update script.\n"); exit(1); } }
-    
+
     if (chmod(script_path, S_IRWXU) != 0) { perror("chmod failed"); exit(1); }
     execl("/bin/bash", "bash", script_path, NULL);
-    exit(0); 
+    exit(0);
 }
 
 static void on_check_update(GtkWidget *widget, gpointer data) {
@@ -65,14 +65,14 @@ static void on_check_update(GtkWidget *widget, gpointer data) {
     g_free(cmd);
     if (!result) { show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Failed to launch release check: %s", error ? error->message : "Unknown"); if (error) g_error_free(error); return; }
     if (exit_status != 0 || !standard_output || strlen(standard_output) == 0) { show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed (Exit: %d).", exit_status); g_free(standard_output); g_free(standard_error); return; }
-    
+
     char *tag_name = extract_sub_json_str(standard_output, "tag_name");
     g_free(standard_output); g_free(standard_error);
 
     if (!tag_name) { show_message(GTK_WINDOW(window), GTK_MESSAGE_WARNING, "Could not parse version info."); return; }
     char *current_tag = g_strdup_printf("v%s", PROXYBRIDGE_VERSION);
-    
-    if (strcmp(tag_name, current_tag) == 0) { show_message(GTK_WINDOW(window), GTK_MESSAGE_INFO, "You are using the latest version (%s).", PROXYBRIDGE_VERSION); } 
+
+    if (strcmp(tag_name, current_tag) == 0) { show_message(GTK_WINDOW(window), GTK_MESSAGE_INFO, "You are using the latest version (%s).", PROXYBRIDGE_VERSION); }
     else {
         GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE, "New version %s is available!\nCurrent: %s\n\nUpdate now?", tag_name, PROXYBRIDGE_VERSION);
         gtk_dialog_add_button(GTK_DIALOG(dialog), "Download Now", GTK_RESPONSE_ACCEPT);
@@ -125,10 +125,10 @@ int main(int argc, char *argv[]) {
 
     if (getuid() != 0) { gtk_init(&argc, &argv); show_message(NULL, GTK_MESSAGE_ERROR, "ProxyBridge must be run as root (sudo)."); return 1; }
     setenv("GSETTINGS_BACKEND", "memory", 1);
-    
-    // load saved config
+
+    // load config from file
     load_config();
-    
+
     gtk_init(&argc, &argv);
 
     GtkSettings *settings = gtk_settings_get_default();
@@ -142,27 +142,27 @@ int main(int argc, char *argv[]) {
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_container_add(GTK_CONTAINER(window), vbox);
 
-    // menu setup
+    // setup menu
     GtkWidget *menubar = gtk_menu_bar_new();
     GtkWidget *proxy_menu_item = gtk_menu_item_new_with_label("Proxy");
     GtkWidget *proxy_menu = gtk_menu_new();
     GtkWidget *config_item = gtk_menu_item_new_with_label("Proxy Settings");
     GtkWidget *rules_item = gtk_menu_item_new_with_label("Proxy Rules");
-    
+
     GtkWidget *log_check_item = gtk_check_menu_item_new_with_label("Enable Traffic Logging");
-    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_check_item), g_chk_logging); 
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_check_item), g_chk_logging);
     g_signal_connect(log_check_item, "toggled", G_CALLBACK(on_log_traffic_toggled), NULL);
 
     GtkWidget *dns_check_item = gtk_check_menu_item_new_with_label("DNS via Proxy");
-    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_check_item), g_chk_dns); 
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_check_item), g_chk_dns);
     g_signal_connect(dns_check_item, "toggled", G_CALLBACK(on_dns_proxy_toggled), NULL);
 
     GtkWidget *exit_item = gtk_menu_item_new_with_label("Exit");
-    
+
     g_signal_connect(config_item, "activate", G_CALLBACK(on_proxy_configure), NULL);
     g_signal_connect(rules_item, "activate", G_CALLBACK(on_proxy_rules_clicked), NULL);
     g_signal_connect(exit_item, "activate", G_CALLBACK(on_window_destroy), NULL);
-    
+
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), config_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), rules_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), gtk_separator_menu_item_new());
@@ -171,7 +171,7 @@ int main(int argc, char *argv[]) {
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), gtk_separator_menu_item_new());
     gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), exit_item);
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(proxy_menu_item), proxy_menu);
-    
+
     GtkWidget *about_menu_item = gtk_menu_item_new_with_label("About");
     GtkWidget *about_menu = gtk_menu_new();
     GtkWidget *about_child_item = gtk_menu_item_new_with_label("About");
@@ -190,7 +190,7 @@ int main(int argc, char *argv[]) {
     GtkWidget *notebook = gtk_notebook_new();
     gtk_box_pack_start(GTK_BOX(vbox), notebook, TRUE, TRUE, 0);
 
-    // active connections tab
+    // connections tab
     GtkWidget *conn_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     gtk_container_set_border_width(GTK_CONTAINER(conn_vbox), 5);
     GtkWidget *conn_toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
@@ -239,16 +239,16 @@ int main(int argc, char *argv[]) {
     status_context_id = gtk_statusbar_get_context_id(GTK_STATUSBAR(status_bar), "Status");
     gtk_box_pack_start(GTK_BOX(vbox), status_bar, FALSE, FALSE, 0);
 
-    // start it up
+    // start
     ProxyBridge_SetLogCallback(lib_log_callback);
     ProxyBridge_SetConnectionCallback(lib_connection_callback);
     ProxyBridge_SetTrafficLoggingEnabled(g_chk_logging);
     ProxyBridge_SetDnsViaProxy(g_chk_dns);
-    
+
     if (ProxyBridge_Start()) {
         // apply config
         ProxyBridge_SetProxyConfig(g_proxy_type, g_proxy_ip, g_proxy_port, g_proxy_user, g_proxy_pass);
-        
+
         // restore rules
         for (GList *l = g_rules_list; l != NULL; l = l->next) {
             RuleData *r = (RuleData *)l->data;

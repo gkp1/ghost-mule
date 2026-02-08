@@ -1,6 +1,6 @@
 #include "gui.h"
 
-// filter the text view based on user imput
+// filter logs based on search
 static void filter_text_view(GtkTextBuffer *buffer, const char *text) {
     if (!buffer) return;
     
@@ -18,7 +18,7 @@ static void filter_text_view(GtkTextBuffer *buffer, const char *text) {
         
         char *line_text = gtk_text_buffer_get_text(buffer, &line_start, &line_end, FALSE);
         
-        // case insensitive search
+        // search case insensitive
         char *lower_line = g_utf8_strdown(line_text, -1);
         char *lower_search = g_utf8_strdown(text, -1);
 
@@ -64,7 +64,7 @@ static void free_connection_data(ConnectionData *data) {
     }
 }
 
-// update logs safely from main thread
+// update logs from main thread
 static gboolean update_log_gui(gpointer user_data) {
     LogData *data = (LogData *)user_data;
     if (!data) return FALSE;
@@ -86,7 +86,7 @@ static gboolean update_log_gui(gpointer user_data) {
     return FALSE; // done
 }
 
-// update connection info safely
+// update conn info
 static gboolean update_connection_gui_append(gpointer user_data) {
     ConnectionData *data = (ConnectionData *)user_data;
     if (!data) return FALSE;

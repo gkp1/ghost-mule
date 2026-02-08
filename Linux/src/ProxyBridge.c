@@ -38,14 +38,14 @@
 #define HTTP_BUFFER_SIZE 1024
 #define LOG_BUFFER_SIZE 1024
 
-// Secure replacement for system() to avoid shell injection and adhere to secure coding practices
+// safe way to run commands without shell injection issues
 static int run_command_v(const char *cmd_path, char *const argv[]) {
     pid_t pid = fork();
     if (pid == -1) {
         return -1;
     } else if (pid == 0) {
-        // Child
-        // Redirect stdout/stderr to /dev/null
+        // child process
+        // send output to /dev/null so it doesnt clutter
         int fd = open("/dev/null", O_WRONLY);
         if (fd >= 0) {
             dup2(fd, STDOUT_FILENO);
@@ -53,9 +53,9 @@ static int run_command_v(const char *cmd_path, char *const argv[]) {
             close(fd);
         }
         execvp(cmd_path, argv);
-        _exit(127); // Access denied or not found
+        _exit(127); // command not found or no perms
     } else {
-        // Parent
+        // parent waits for child
         int status;
         waitpid(pid, &status, 0);
         if (WIFEXITED(status)) {
@@ -65,9 +65,9 @@ static int run_command_v(const char *cmd_path, char *const argv[]) {
     }
 }
 
-// Helper to run simple commands without arguments or simplified interface
+// run iptables commands easier
 static int run_iptables_cmd(const char *arg1, const char *arg2, const char *arg3, const char *arg4, const char *arg5, const char *arg6, const char *arg7, const char *arg8, const char *arg9, const char *arg10, const char *arg11, const char *arg12, const char *arg13, const char *arg14) {
-    // Construct argv excluding NULLs
+    // build argv array skipping null args
     const char *argv[17];
     int i = 0;
     argv[i++] = "iptables";
@@ -86,11 +86,11 @@ static int run_iptables_cmd(const char *arg1, const char *arg2, const char *arg3
     if (arg13) argv[i++] = arg13;
     if (arg14) argv[i++] = arg14;
     argv[i] = NULL;
-    
+
     return run_command_v("iptables", (char **)argv);
 }
 
-// Helper for strtol to replace atoi
+// convert string to int safely
 static int safe_atoi(const char *str) {
     if (!str) return 0;
     char *endptr;
@@ -175,7 +175,7 @@ static bool g_has_active_rules = false;
 static bool running = false;
 static uint32_t g_current_process_id = 0;
 
-// UDP relay globals
+// udp relay stuff
 static int udp_relay_socket = -1;
 static int socks5_udp_control_socket = -1;
 static int socks5_udp_send_socket = -1;
@@ -248,7 +248,7 @@ static bool parse_token_list(const char *list, const char *delimiters, token_mat
     {
         token = skip_whitespace(token);
 
-        // Trim trailing whitespace
+        // remove spaces at end
         size_t tlen = strlen(token);
         while (tlen > 0 && (token[tlen - 1] == ' ' || token[tlen - 1] == '\t' || token[tlen-1] == '\r' || token[tlen-1] == '\n'))
         {
@@ -336,28 +336,28 @@ static void cache_pid(uint32_t src_ip, uint16_t src_port, uint32_t pid, bool is_
 static void clear_pid_cache(void);
 static void update_has_active_rules(void);
 
-// Find PID that owns a socket inode by scanning /proc/[pid]/fd/
-// Uses UID hint from netlink to skip non-matching processes
+// find which process owns a socket by checking /proc
+// uses uid hint to skip processes we dont need to check
 static uint32_t find_pid_from_inode(unsigned long target_inode, uint32_t uid_hint)
 {
-    // Build the expected link target string once
+    // build the socket string we're looking for
     char expected[64];
     int expected_len = snprintf(expected, sizeof(expected), "socket:[%lu]", target_inode);
-    
+
     DIR *proc_dir = opendir("/proc");
     if (!proc_dir)
         return 0;
-    
+
     uint32_t pid = 0;
     struct dirent *proc_entry;
-    
+
     while ((proc_entry = readdir(proc_dir)) != NULL) {
-        // Skip non-numeric entries (not PID dirs)
+        // skip stuff that aint a pid folder
         if (proc_entry->d_type != DT_DIR || !isdigit(proc_entry->d_name[0]))
             continue;
-        
-        // If we have a UID hint from netlink, skip processes owned by other users
-        // This dramatically reduces the /proc/*/fd scan scope
+
+        // if we know the user id, skip other users processes
+        // makes this way faster cuz less folders to check
         if (uid_hint != (uint32_t)-1) {
             struct stat proc_stat;
             char proc_path[280];
@@ -365,22 +365,22 @@ static uint32_t find_pid_from_inode(unsigned long target_inode, uint32_t uid_hin
             if (stat(proc_path, &proc_stat) == 0 && proc_stat.st_uid != uid_hint)
                 continue;
         }
-        
+
         char fd_path[280];
         snprintf(fd_path, sizeof(fd_path), "/proc/%s/fd", proc_entry->d_name);
         DIR *fd_dir = opendir(fd_path);
         if (!fd_dir)
             continue;
-        
+
         struct dirent *fd_entry;
         while ((fd_entry = readdir(fd_dir)) != NULL) {
             if (fd_entry->d_name[0] == '.')
                 continue;
-            
+
             char link_path[560];
             snprintf(link_path, sizeof(link_path), "/proc/%s/fd/%s",
                     proc_entry->d_name, fd_entry->d_name);
-            
+
             char link_target[64];
             ssize_t link_len = readlink(link_path, link_target, sizeof(link_target) - 1);
             if (link_len == expected_len) {
@@ -399,8 +399,8 @@ static uint32_t find_pid_from_inode(unsigned long target_inode, uint32_t uid_hin
     return pid;
 }
 
-// Optimized PID lookup using netlink sock_diag
-// Uses exact netlink query (no DUMP) for TCP, targeted DUMP for UDP
+// fast pid lookup using netlink
+// tcp uses exact query, udp needs dump
 static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_port, bool is_udp)
 {
     uint32_t cached_pid = get_cached_pid(src_ip, src_port, is_udp);
@@ -411,7 +411,7 @@ static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_por
     if (fd < 0)
         return 0;
 
-    // Set a short timeout to avoid blocking packet processing
+    // short timeout so we dont block packet flow
     struct timeval tv = {0, 100000}; // 100ms
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
@@ -426,8 +426,8 @@ static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_por
     req.r.sdiag_family = AF_INET;
     req.r.sdiag_protocol = is_udp ? IPPROTO_UDP : IPPROTO_TCP;
 
-    // For UDP: must use DUMP (connectionless sockets don't support exact lookup)
-    // For TCP: use DUMP with state filter for SYN_SENT + ESTABLISHED only
+    // udp needs dump cuz no connection state to match on
+    // tcp can filter to only syn_sent and established states
     req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
     if (!is_udp)
         req.r.idiag_states = (1 << 2) | (1 << 3); // SYN_SENT(2) + ESTABLISHED(3) only
@@ -465,7 +465,7 @@ static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_por
             if (h->nlmsg_type == SOCK_DIAG_BY_FAMILY) {
                 struct inet_diag_msg *r = NLMSG_DATA(h);
 
-                // Match src IP and port
+                // check if this is our socket
                 if (r->id.idiag_src[0] == src_ip && ntohs(r->id.idiag_sport) == src_port) {
                     target_inode = r->idiag_inode;
                     target_uid = r->idiag_uid; // UID to narrow /proc scan
@@ -480,21 +480,21 @@ static uint32_t get_process_id_from_connection(uint32_t src_ip, uint16_t src_por
 nl_done:
     close(fd);
 
-    // If netlink found the socket, find PID from inode
-    // Skip the redundant /proc/net/tcp scan - netlink already gave us the inode
+    // if netlink found it, now find pid from inode
+    // no need to scan /proc/net/tcp since we got inode already
     if (found && target_inode != 0) {
         pid = find_pid_from_inode(target_inode, target_uid);
     }
 
-    // Fallback for UDP: scan /proc/net/udp if netlink didn't find the socket
-    // This happens when UDP socket uses sendto() without connect()
+    // fallback for udp if netlink didnt find it
+    // happens when app uses sendto without connecting socket first
     if (!found && is_udp) {
         const char* udp_files[] = {"/proc/net/udp", "/proc/net/udp6"};
         for (int file_idx = 0; file_idx < 2 && pid == 0; file_idx++) {
             FILE *fp = fopen(udp_files[file_idx], "r");
             if (!fp)
                 continue;
-            
+
             char line[512];
             if (!fgets(line, sizeof(line), fp)) { // skip header
                 fclose(fp);
@@ -504,7 +504,7 @@ nl_done:
                 unsigned int local_addr, local_port;
                 unsigned long inode;
                 int uid_val;
-                
+
                 if (sscanf(line, "%*d: %X:%X %*X:%*X %*X %*X:%*X %*X:%*X %*X %d %*d %lu",
                           &local_addr, &local_port, &uid_val, &inode) == 4) {
                     if (local_port == src_port && inode != 0) {
@@ -527,8 +527,8 @@ static bool get_process_name_from_pid(uint32_t pid, char *name, size_t name_size
     if (pid == 0)
         return false;
 
-    // PID 1 is reserved for init/systemd on Linux
-    // Similar to Windows PID 4 (System), some system processes use PID 1
+    // pid 1 is always init/systemd
+    // kinda like windows pid 4 for system stuff
     if (pid == 1)
     {
         snprintf(name, name_size, "systemd");
@@ -537,11 +537,11 @@ static bool get_process_name_from_pid(uint32_t pid, char *name, size_t name_size
 
     char path[64];
     snprintf(path, sizeof(path), "/proc/%u/exe", pid);
-    
+
     ssize_t len = readlink(path, name, name_size - 1);
     if (len < 0)
         return false;
-    
+
     name[len] = '\0';
     return true;
 }
@@ -745,25 +745,25 @@ static uint32_t resolve_hostname(const char *hostname)
 
 static bool is_broadcast_or_multicast(uint32_t ip)
 {
-    // Localhost: 127.0.0.0/8 (127.x.x.x)
+    // localhost
     uint8_t first_octet = (ip >> 0) & 0xFF;
     if (first_octet == 127)
         return true;
 
-    // APIPA (Link-Local): 169.254.0.0/16 (169.254.x.x)
+    // link-local apipa stuff
     uint8_t second_octet = (ip >> 8) & 0xFF;
     if (first_octet == 169 && second_octet == 254)
         return true;
 
-    // Broadcast: 255.255.255.255
+    // broadcast
     if (ip == 0xFFFFFFFF)
         return true;
 
-    // x.x.x.255 (subnet broadcasts)
+    // subnet broadcast
     if ((ip & 0xFF000000) == 0xFF000000)
         return true;
 
-    // Multicast: 224.0.0.0 - 239.255.255.255 (first octet 224-239)
+    // multicast range
     if (first_octet >= 224 && first_octet <= 239)
         return true;
 
@@ -923,7 +923,7 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
         memcpy(buf + 2, g_proxy_username, ulen);
         buf[2 + ulen] = (unsigned char)plen;
         memcpy(buf + 3 + ulen, g_proxy_password, plen);
-        
+
         if (send(s, buf, 3 + ulen + plen, MSG_NOSIGNAL) != (ssize_t)(3 + ulen + plen))
         {
             log_message("socks5 failed to send credentials");
@@ -981,7 +981,7 @@ static int http_connect(int s, uint32_t dest_ip, uint16_t dest_port)
 
     if (g_proxy_username[0] != '\0')
     {
-        // Base64 encode username:password
+        // encode user:pass in base64
         static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         char auth_raw[512];
         int auth_raw_len = snprintf(auth_raw, sizeof(auth_raw), "%s:%s", g_proxy_username, g_proxy_password);
@@ -1033,9 +1033,9 @@ static int http_connect(int s, uint32_t dest_ip, uint16_t dest_port)
     return 0;
 }
 
-// ===== EPOLL RELAY FUNCTIONS (Production) =====
+// relay functions for production use
 
-// Windows-style connection handler - blocks on connect and handshake, then calls transfer_handler
+// connection handler like windows - blocks on connect then transfers data
 static void* connection_handler(void *arg)
 {
     connection_config_t *config = (connection_config_t *)arg;
@@ -1048,11 +1048,11 @@ static void* connection_handler(void *arg)
 
     free(config);
 
-    // Use cached proxy IP (resolved once at config time)
+    // use cached proxy ip we resolved earlier
     proxy_ip = g_proxy_ip_cached;
     if (proxy_ip == 0)
     {
-        // Try resolving again as fallback
+        // try resolving again if cache failed
         proxy_ip = resolve_hostname(g_proxy_host);
         if (proxy_ip == 0)
         {
@@ -1084,7 +1084,7 @@ static void* connection_handler(void *arg)
         return NULL;
     }
 
-    // Do blocking handshake
+    // do handshake blocking
     if (g_proxy_type == PROXY_TYPE_SOCKS5)
     {
         if (socks5_connect(proxy_sock, dest_ip, dest_port) != 0)
@@ -1104,7 +1104,7 @@ static void* connection_handler(void *arg)
         }
     }
 
-    // Create transfer config
+    // setup transfer config
     transfer_config_t *transfer_config = (transfer_config_t *)malloc(sizeof(transfer_config_t));
     if (transfer_config == NULL)
     {
@@ -1116,15 +1116,15 @@ static void* connection_handler(void *arg)
     transfer_config->from_socket = client_sock;
     transfer_config->to_socket = proxy_sock;
 
-    // Do bidirectional transfer in this thread (like Windows)
+    // transfer data both ways in this thread
     transfer_handler((void*)transfer_config);
 
     return NULL;
 }
 
-// bidirectional relay using splice() for zero-copy transfer.
-// data moves from kernel to kernel through a pipe, never touching userspace memory.
-// This eliminates the main throughput bottleneck of copying data through userspace.
+// relay data both ways using splice for zero-copy
+// data goes kernel to kernel thru pipe, never hits userspace
+// way faster than copying thru userspace buffers
 static void* transfer_handler(void *arg)
 {
     transfer_config_t *config = (transfer_config_t *)arg;
@@ -1132,25 +1132,25 @@ static void* transfer_handler(void *arg)
     int sock2 = config->to_socket;    // proxy socket
     free(config);
 
-    // Create pipes for splice: one per direction
-    // pipe_a: sock2 (proxy) → sock1 (client) = DOWNLOAD
-    // pipe_b: sock1 (client) → sock2 (proxy) = UPLOAD
+    // make 2 pipes for splice
+    // pipe_a: proxy to client (download)
+    // pipe_b: client to proxy (upload)
     int pipe_a[2] = {-1, -1};
     int pipe_b[2] = {-1, -1};
 
     if (pipe2(pipe_a, O_CLOEXEC | O_NONBLOCK) < 0 ||
         pipe2(pipe_b, O_CLOEXEC | O_NONBLOCK) < 0) {
-        // pipe creation failed - close any that opened and fall back
+        // pipe failed, cleanup and fallback
         if (pipe_a[0] >= 0) { close(pipe_a[0]); close(pipe_a[1]); }
         if (pipe_b[0] >= 0) { close(pipe_b[0]); close(pipe_b[1]); }
         goto fallback;
     }
 
-    // Increase pipe capacity for throughput (default 64KB → 1MB)
+    // make pipes bigger for better speed (64kb to 1mb)
     fcntl(pipe_a[0], F_SETPIPE_SZ, 1048576);
     fcntl(pipe_b[0], F_SETPIPE_SZ, 1048576);
 
-    // Make sockets non-blocking for splice
+    // set sockets to nonblocking for splice
     fcntl(sock1, F_SETFL, fcntl(sock1, F_GETFL, 0) | O_NONBLOCK);
     fcntl(sock2, F_SETFL, fcntl(sock2, F_GETFL, 0) | O_NONBLOCK);
 
@@ -1165,9 +1165,9 @@ static void* transfer_handler(void *arg)
 
         while (1)
         {
-            // Build poll set - use fd=-1 to exclude sockets we're done with
-            // CRITICAL: poll() always reports POLLHUP even if events=0,
-            // causing a busy-loop. Setting fd=-1 makes poll() skip the entry entirely.
+            // build poll set, use fd=-1 to skip closed sockets
+            // important: poll reports POLLHUP even with events=0
+            // so use fd=-1 to actually skip it or we get busy loop
             fds[0].fd = (!sock1_done || pipe_a_bytes > 0 || pipe_b_bytes > 0) ? sock1 : -1;
             fds[1].fd = (!sock2_done || pipe_b_bytes > 0 || pipe_a_bytes > 0) ? sock2 : -1;
             fds[0].events = 0;
@@ -1175,19 +1175,19 @@ static void* transfer_handler(void *arg)
             fds[0].revents = 0;
             fds[1].revents = 0;
 
-            // Download direction: proxy→pipe_a→client
+            // download: proxy to client
             if (!sock2_done && pipe_a_bytes == 0)
                 fds[1].events |= POLLIN;    // read from proxy
             if (pipe_a_bytes > 0)
                 fds[0].events |= POLLOUT;   // write to client
 
-            // Upload direction: client→pipe_b→proxy
+            // upload: client to proxy
             if (!sock1_done && pipe_b_bytes == 0)
                 fds[0].events |= POLLIN;    // read from client
             if (pipe_b_bytes > 0)
                 fds[1].events |= POLLOUT;   // write to proxy
 
-            // Nothing left to do
+            // all done
             if (fds[0].fd == -1 && fds[1].fd == -1)
                 break;
             if (fds[0].events == 0 && fds[1].events == 0)
@@ -1201,17 +1201,17 @@ static void* transfer_handler(void *arg)
             if (ready == 0)
                 break; // 60s idle timeout
 
-            // Handle errors and hangups on each socket
+            // check for errors and hangups
             if (fds[0].revents & POLLERR) break;
             if (fds[1].revents & POLLERR) break;
 
-            // POLLHUP means peer closed - treat as EOF for reads
+            // pollhup means other side closed
             if ((fds[1].revents & POLLHUP) && !(fds[1].revents & POLLIN))
                 sock2_done = true;
             if ((fds[0].revents & POLLHUP) && !(fds[0].revents & POLLIN))
                 sock1_done = true;
 
-            // === DOWNLOAD: proxy (sock2) → pipe_a → client (sock1) ===
+            // download path
 
             if (!sock2_done && pipe_a_bytes == 0 && (fds[1].revents & POLLIN)) {
                 ssize_t n = splice(sock2, NULL, pipe_a[1], NULL, 1048576,
@@ -1235,7 +1235,7 @@ static void* transfer_handler(void *arg)
                 }
             }
 
-            // === UPLOAD: client (sock1) → pipe_b → proxy (sock2) ===
+            // upload path
 
             if (!sock1_done && pipe_b_bytes == 0 && (fds[0].revents & POLLIN)) {
                 ssize_t n = splice(sock1, NULL, pipe_b[1], NULL, 1048576,
@@ -1259,8 +1259,8 @@ static void* transfer_handler(void *arg)
                 }
             }
 
-            // Half-close: when one side is done and its pipe is drained,
-            // signal the other side with shutdown(SHUT_WR)
+            // half-close when one side done and pipe empty
+            // tell other side with shutdown
             if (sock2_done && pipe_a_bytes == 0 && !shut_wr_sock1) {
                 shutdown(sock1, SHUT_WR);
                 shut_wr_sock1 = true;
@@ -1270,7 +1270,7 @@ static void* transfer_handler(void *arg)
                 shut_wr_sock2 = true;
             }
 
-            // Both sides done and all pipes drained
+            // both sides finished and pipes empty
             if (sock1_done && sock2_done && pipe_a_bytes == 0 && pipe_b_bytes == 0)
                 break;
         }
@@ -1281,7 +1281,7 @@ static void* transfer_handler(void *arg)
     goto cleanup;
 
 fallback:
-    // Fallback: traditional recv/send relay if pipes failed
+    // fallback to normal recv/send if pipes didnt work
     {
         char buf[131072];
         struct pollfd fds[2];
@@ -1310,7 +1310,7 @@ fallback:
                 did_work = true;
             }
 
-            // POLLHUP with no POLLIN data means peer closed - exit
+            // pollhup with no data means peer closed
             if (!did_work) break;
         }
     }
@@ -1323,7 +1323,7 @@ cleanup:
     return NULL;
 }
 
-// Proxy server - accepts connections and spawns relay threads
+// proxy server accepts connections and spawns threads
 static void* local_proxy_server(void *arg)
 {
     (void)arg;
@@ -1360,8 +1360,8 @@ static void* local_proxy_server(void *arg)
         return NULL;
     }
 
-    // Pre-create thread attributes with small stack (256KB instead of 8MB default)
-    // Each relay thread only needs splice() state - no 256KB userspace buffer anymore
+    // create thread attrs with small stack (256kb not 8mb)
+    // relay threads dont need big buffers anymore cuz splice
     pthread_attr_t thread_attr;
     pthread_attr_init(&thread_attr);
     pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_DETACHED);
@@ -1415,20 +1415,20 @@ static void* local_proxy_server(void *arg)
     return NULL;
 }
 
-// SOCKS5 UDP ASSOCIATE
+// socks5 udp associate
 static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
 {
     unsigned char buf[512];
     ssize_t len;
-    
-    // Auth handshake
+
+    // auth handshake
     bool use_auth = (g_proxy_username[0] != '\0');
     buf[0] = SOCKS5_VERSION;
     buf[1] = use_auth ? 0x02 : 0x01;
     buf[2] = SOCKS5_AUTH_NONE;
     if (use_auth)
         buf[3] = 0x02;  // username/password auth
-    
+
     if (send(s, buf, use_auth ? 4 : 3, MSG_NOSIGNAL) != (use_auth ? 4 : 3))
         return -1;
 
@@ -1445,7 +1445,7 @@ static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
         memcpy(buf + 2, g_proxy_username, ulen);
         buf[2 + ulen] = (unsigned char)plen;
         memcpy(buf + 3 + ulen, g_proxy_password, plen);
-        
+
         if (send(s, buf, 3 + ulen + plen, MSG_NOSIGNAL) != (ssize_t)(3 + ulen + plen))
             return -1;
 
@@ -1456,7 +1456,7 @@ static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
     else if (buf[1] != SOCKS5_AUTH_NONE)
         return -1;
 
-    // UDP ASSOCIATE request
+    // udp associate request
     buf[0] = SOCKS5_VERSION;
     buf[1] = SOCKS5_CMD_UDP_ASSOCIATE;
     buf[2] = 0x00;
@@ -1471,7 +1471,7 @@ static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
     if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
         return -1;
 
-    // Extract relay address
+    // get relay address
     if (buf[3] == SOCKS5_ATYP_IPV4)
     {
         memset(relay_addr, 0, sizeof(*relay_addr));
@@ -1534,7 +1534,7 @@ static bool establish_udp_associate(void)
         return false;
     }
 
-    // RFC 1928: if server returns 0.0.0.0 as relay address, use the proxy server's IP
+    // rfc says if server gives 0.0.0.0 use proxy servers ip instead
     if (socks5_udp_relay_addr.sin_addr.s_addr == INADDR_ANY)
         socks5_udp_relay_addr.sin_addr.s_addr = socks5_ip;
 
@@ -1555,7 +1555,7 @@ static bool establish_udp_associate(void)
     return true;
 }
 
-// Tear down UDP associate state so next packet triggers reconnect
+// teardown udp associate so next packet reconnects
 static void teardown_udp_associate(void)
 {
     udp_associate_connected = false;
@@ -1599,7 +1599,7 @@ static void* udp_relay_server(void *arg)
         return NULL;
     }
 
-    // Try initial connection (non-fatal if proxy not running yet)
+    // try initial connect, not fatal if proxy not up yet
     udp_associate_connected = establish_udp_associate();
 
     while (running)
@@ -1607,17 +1607,17 @@ static void* udp_relay_server(void *arg)
         struct pollfd fds[3];
         int nfds = 1;
 
-        // Always monitor the local relay socket for client packets
+        // watch local relay socket for client packets
         fds[0].fd = udp_relay_socket;
         fds[0].events = POLLIN;
         fds[0].revents = 0;
 
-        // Monitor SOCKS5 UDP socket for proxy responses
+        // watch socks5 udp socket for proxy responses
         fds[1].fd = (udp_associate_connected && socks5_udp_send_socket >= 0) ? socks5_udp_send_socket : -1;
         fds[1].events = POLLIN;
         fds[1].revents = 0;
 
-        // Monitor SOCKS5 TCP control socket for death detection (like Windows MSG_PEEK)
+        // watch socks5 tcp socket to detect if connection dies
         fds[2].fd = (udp_associate_connected && socks5_udp_control_socket >= 0) ? socks5_udp_control_socket : -1;
         fds[2].events = POLLIN;
         fds[2].revents = 0;
@@ -1627,21 +1627,21 @@ static void* udp_relay_server(void *arg)
         if (ready <= 0)
             continue;
 
-        // Check TCP control socket health (Windows-style MSG_PEEK probe)
-        // If the TCP control connection dies, the UDP associate is invalid
+        // check if tcp control still alive
+        // if it dies the udp associate is dead too
         if (fds[2].fd >= 0 && (fds[2].revents & (POLLIN | POLLHUP | POLLERR)))
         {
             char peek_buf[1];
             ssize_t peek_len = recv(socks5_udp_control_socket, peek_buf, 1, MSG_PEEK | MSG_DONTWAIT);
             if (peek_len == 0 || (peek_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
             {
-                // TCP control connection died - proxy is gone
+                // tcp died, proxy is gone
                 teardown_udp_associate();
                 continue;
             }
         }
 
-        // Client -> SOCKS5 proxy
+        // client sending to proxy
         if (fds[0].revents & POLLIN)
         {
             from_len = sizeof(from_addr);
@@ -1650,7 +1650,7 @@ static void* udp_relay_server(void *arg)
             if (recv_len <= 0)
                 continue;
 
-            // Try to establish connection if not connected (proxy may have started)
+            // try to connect if not connected yet
             if (!udp_associate_connected)
             {
                 if (!establish_udp_associate())
@@ -1664,13 +1664,11 @@ static void* udp_relay_server(void *arg)
             if (!get_connection(client_port, &dest_ip, &dest_port))
                 continue;
 
-            // Buffer overflow guard: ensure data + 10-byte SOCKS5 header fits
+            // make sure data fits with socks5 header
             if (recv_len > (ssize_t)(sizeof(send_buf) - 10))
                 continue;
 
-            // Build SOCKS5 UDP packet: +----+------+------+----------+----------+----------+
-            //                           |RSV | FRAG | ATYP | DST.ADDR | DST.PORT |   DATA   |
-            //                           +----+------+------+----------+----------+----------+
+            // build socks5 udp packet header
             send_buf[0] = 0x00;  // RSV
             send_buf[1] = 0x00;  // RSV
             send_buf[2] = 0x00;  // FRAG
@@ -1683,21 +1681,21 @@ static void* udp_relay_server(void *arg)
             ssize_t sent = sendto(socks5_udp_send_socket, send_buf, 10 + recv_len, 0,
                    (struct sockaddr *)&socks5_udp_relay_addr, sizeof(socks5_udp_relay_addr));
 
-            // If sendto fails, proxy is dead - tear down and retry on next packet
+            // if send fails proxy died, teardown and retry later
             if (sent < 0)
             {
                 teardown_udp_associate();
             }
         }
 
-        // SOCKS5 proxy -> Client
+        // proxy sending back to client
         if (fds[1].fd >= 0 && (fds[1].revents & POLLIN))
         {
             from_len = sizeof(from_addr);
             ssize_t recv_len = recvfrom(socks5_udp_send_socket, recv_buf, sizeof(recv_buf), 0,
                                         (struct sockaddr *)&from_addr, &from_len);
 
-            // Handle socket errors - proxy may have died
+            // socket error, proxy might be dead
             if (recv_len < 0)
             {
                 if (errno != EAGAIN && errno != EWOULDBLOCK)
@@ -1707,11 +1705,11 @@ static void* udp_relay_server(void *arg)
             if (recv_len < 10)
                 continue;
 
-            // Fragmented SOCKS5 UDP packets not supported
+            // we dont support fragmented packets
             if (recv_buf[2] != 0x00)
                 continue;
 
-            // Parse SOCKS5 UDP packet
+            // parse socks5 udp packet
             if (recv_buf[3] != SOCKS5_ATYP_IPV4)
                 continue;
 
@@ -1721,13 +1719,13 @@ static void* udp_relay_server(void *arg)
             memcpy(&src_port, recv_buf + 8, 2);
             src_port = ntohs(src_port);
 
-            // Find the client that sent a packet to this destination
-            // Iterate through hash table to find matching dest_ip:dest_port
+            // find which client sent packet to this destination
+            // loop thru hash table looking for dest match
             pthread_rwlock_rdlock(&conn_lock);
-            
+
             struct sockaddr_in client_addr;
             bool found_client = false;
-            
+
             for (int hash = 0; hash < CONNECTION_HASH_SIZE; hash++)
             {
                 CONNECTION_INFO *conn = connection_hash_table[hash];
@@ -1736,7 +1734,7 @@ static void* udp_relay_server(void *arg)
                     if (conn->orig_dest_ip == src_ip &&
                         conn->orig_dest_port == src_port)
                     {
-                        // Found the connection - send response back to original client port
+                        // found it, send response back to original client port
                         memset(&client_addr, 0, sizeof(client_addr));
                         client_addr.sin_family = AF_INET;
                         client_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -1749,19 +1747,19 @@ static void* udp_relay_server(void *arg)
                 if (found_client)
                     break;
             }
-            
+
             pthread_rwlock_unlock(&conn_lock);
-            
+
             if (found_client)
             {
-                // Send unwrapped UDP data back to client
+                // send unwrapped data back to client
                 ssize_t data_len = recv_len - 10;
                 sendto(udp_relay_socket, recv_buf + 10, data_len, 0,
                        (struct sockaddr *)&client_addr, sizeof(client_addr));
             }
         }
 
-        // Handle POLLHUP/POLLERR on the UDP send socket
+        // handle errors on udp send socket
         if (fds[1].fd >= 0 && (fds[1].revents & (POLLHUP | POLLERR)))
         {
             teardown_udp_associate();
@@ -1775,25 +1773,25 @@ static void* udp_relay_server(void *arg)
     return NULL;
 }
 
-// nfqueue packet callback
+// nfqueue callback for packets
 static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfad, void *data)
 {
     (void)nfmsg;
     (void)data;
-    
+
     struct nfqnl_msg_packet_hdr *ph = nfq_get_msg_packet_hdr(nfad);
     if (!ph) return nfq_set_verdict(qh, 0, NF_ACCEPT, 0, NULL);
 
     uint32_t id = ntohl(ph->packet_id);
-    
+
     unsigned char *payload;
     int payload_len = nfq_get_payload(nfad, &payload);
     if (payload_len < (int)sizeof(struct iphdr))
         return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
     struct iphdr *iph = (struct iphdr *)payload;
-    
-    // fast path - no rules configured
+
+    // fast path when no rules
     if (!g_has_active_rules && g_connection_callback == NULL)
         return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
@@ -1813,14 +1811,14 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         src_port = ntohs(tcph->source);
         dest_port = ntohs(tcph->dest);
 
-        // skip packets from local relay
+        // skip our own packets from local relay
         if (src_port == g_local_relay_port)
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
         if (is_connection_tracked(src_port))
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
-        // only process SYN packets for new connections
+        // only look at syn packets for new connections
         if (!(tcph->syn && !tcph->ack))
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 
@@ -1832,7 +1830,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(dest_ip))
             action = RULE_ACTION_DIRECT;
 
-        // log connection (skip our own process)
+        // log it if not from our own process
         if (g_traffic_logging_enabled && g_connection_callback != NULL && (tcph->syn && !tcph->ack) && pid > 0 && pid != g_current_process_id)
         {
             char process_name[MAX_PROCESS_NAME];
@@ -1861,7 +1859,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
 
                     const char* display_name = extract_filename(process_name);
                     g_connection_callback(display_name, pid, dest_ip_str, dest_port, proxy_info);
-                    
+
                     add_logged_connection(pid, dest_ip, dest_port, action);
                 }
             }
@@ -1875,7 +1873,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         {
             // store connection info
             add_connection(src_port, src_ip, dest_ip, dest_port);
-            
+
             // mark packet so nat table REDIRECT rule will catch it
             uint32_t mark = 1;
             return nfq_set_verdict2(qh, id, NF_ACCEPT, mark, 0, NULL);
@@ -1906,7 +1904,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
 
         if (action == RULE_ACTION_PROXY && (dest_port == 67 || dest_port == 68))
             action = RULE_ACTION_DIRECT;
-        
+
         // UDP proxy only works with SOCKS5, not HTTP
         if (action == RULE_ACTION_PROXY && g_proxy_type != PROXY_TYPE_SOCKS5)
             action = RULE_ACTION_DIRECT;
@@ -1916,7 +1914,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         {
             char process_name[MAX_PROCESS_NAME];
             uint32_t log_pid = (pid == 0) ? 1 : pid;  // Use PID 1 for unknown processes
-            
+
             if (pid > 0 && get_process_name_from_pid(pid, process_name, sizeof(process_name)))
             {
                 // Got process name from PID
@@ -1926,7 +1924,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
                 // UDP socket not found - ephemeral or timing issue
                 snprintf(process_name, sizeof(process_name), "unknown");
             }
-            
+
             if (!is_connection_already_logged(log_pid, dest_ip, dest_port, action))
             {
                     char dest_ip_str[32];
@@ -1949,7 +1947,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
 
                     const char* display_name = extract_filename(process_name);
                     g_connection_callback(display_name, log_pid, dest_ip_str, dest_port, proxy_info);
-                    
+
                     add_logged_connection(log_pid, dest_ip, dest_port, action);
                 }
         }
@@ -1962,7 +1960,7 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, stru
         {
             // UDP proxy via SOCKS5 UDP ASSOCIATE
             add_connection(src_port, src_ip, dest_ip, dest_port);
-            
+
             // Mark UDP packet for redirect to local UDP relay (port 34011)
             uint32_t mark = 2;  // Use mark=2 for UDP (mark=1 is for TCP)
             return nfq_set_verdict2(qh, id, NF_ACCEPT, mark, 0, NULL);
@@ -2186,7 +2184,7 @@ static bool is_connection_already_logged(uint32_t pid, uint32_t dest_ip, uint16_
     LOGGED_CONNECTION *logged = logged_connections;
     while (logged != NULL)
     {
-        if (logged->pid == pid && logged->dest_ip == dest_ip && 
+        if (logged->pid == pid && logged->dest_ip == dest_ip &&
             logged->dest_port == dest_port && logged->action == action)
         {
             pthread_mutex_unlock(&log_lock);
@@ -2737,20 +2735,20 @@ bool ProxyBridge_Start(void)
     // mangle table runs before nat, so we can mark packets there
     int ret1 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
     int ret2 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
-    
+
     if (ret1 != 0 || ret2 != 0) {
         log_message("failed to add iptables rules ret1=%d ret2=%d", ret1, ret2);
     } else {
         log_message("iptables nfqueue rules added successfully");
     }
-    
+
     // setup nat redirect for marked packets
     int ret3 = run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
     int ret4 = run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
     if (ret3 != 0 || ret4 != 0) {
         log_message("failed to add nat redirect rules");
     }
-    
+
     (void)ret3;
     (void)ret4;
 

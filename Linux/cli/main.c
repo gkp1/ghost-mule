@@ -227,7 +227,7 @@ static bool parse_proxy_url(const char* url, ProxyType* type, char* host, uint16
     username[0] = '\0';
     password[0] = '\0';
     
-    // Parse type://
+    // parse type://
     char* scheme_end = strstr(buffer, "://");
     if (scheme_end == NULL)
     {
@@ -254,7 +254,7 @@ static bool parse_proxy_url(const char* url, ProxyType* type, char* host, uint16
         return false;
     }
     
-    // Parse host:port[:username:password]
+    // parse host:port[:user:pass]
     char* parts[4];
     int num_parts = 0;
     char* token = strtok(rest, ":");
@@ -298,7 +298,7 @@ static bool is_root(void)
 
 int main(int argc, char *argv[])
 {
-    // Check for cleanup flag first - ignores all other args
+    // check cleanup flag
     for (int i = 1; i < argc; i++)
     {
         if (strcmp(argv[i], "--cleanup") == 0)
@@ -315,7 +315,7 @@ int main(int argc, char *argv[])
     int num_rules = 0;
     bool dns_via_proxy = true;
     
-    // Parse arguments
+    // parse args
     for (int i = 1; i < argc; i++)
     {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
@@ -371,7 +371,7 @@ int main(int argc, char *argv[])
     
     show_banner();
     
-    // Check root privileges
+    // need root
     if (!is_root())
     {
         printf("\033[31m\nERROR: ProxyBridge requires root privileges!\033[0m\n");
@@ -379,7 +379,7 @@ int main(int argc, char *argv[])
         return 1;
     }
     
-    // Parse proxy configuration
+    // parse proxy config
     ProxyType proxy_type;
     char proxy_host[256];
     uint16_t proxy_port;
@@ -389,11 +389,8 @@ int main(int argc, char *argv[])
     if (!parse_proxy_url(proxy_url, &proxy_type, proxy_host, &proxy_port, proxy_username, proxy_password))
         return 1;
     
-    // Setup callbacks based on verbose level - only enable what we need
-    // Verbose 0: No callbacks, no logging (most efficient)
-    // Verbose 1: Only log messages
-    // Verbose 2: Only connection events
-    // Verbose 3: Both logs and connections
+    // setup callbacks based on verbose
+    // 0=nothing 1=logs 2=connections 3=both
     
     if (verbose_level == 1 || verbose_level == 3)
         ProxyBridge_SetLogCallback(log_callback);
@@ -405,10 +402,10 @@ int main(int argc, char *argv[])
     else
         ProxyBridge_SetConnectionCallback(NULL);  // Explicitly disable
     
-    // Enable traffic logging in C library only when needed (prevents unnecessary processing)
+    // turn on traffic logging when needed
     ProxyBridge_SetTrafficLoggingEnabled(verbose_level > 0);
     
-    // Display configuration
+    // show config
     printf("Proxy: %s://%s:%u\n", 
            proxy_type == PROXY_TYPE_HTTP ? "http" : "socks5",
            proxy_host, proxy_port);
@@ -418,7 +415,7 @@ int main(int argc, char *argv[])
     
     printf("DNS via Proxy: %s\n", dns_via_proxy ? "Enabled" : "Disabled");
     
-    // Configure proxy
+    // setup proxy
     if (!ProxyBridge_SetProxyConfig(proxy_type, proxy_host, proxy_port, 
                                     proxy_username[0] ? proxy_username : "",
                                     proxy_password[0] ? proxy_password : ""))
@@ -429,7 +426,7 @@ int main(int argc, char *argv[])
     
     ProxyBridge_SetDnsViaProxy(dns_via_proxy);
     
-    // Add rules
+    // add rules
     if (num_rules > 0)
     {
         printf("Rules: %d\n", num_rules);
@@ -469,7 +466,7 @@ int main(int argc, char *argv[])
         printf("Use --rule to add proxy rules. See --help for examples.\n");
     }
     
-    // Start ProxyBridge
+    // start proxybridge
     if (!ProxyBridge_Start())
     {
         fprintf(stderr, "ERROR: Failed to start ProxyBridge\n");
@@ -485,13 +482,13 @@ int main(int argc, char *argv[])
     signal(SIGABRT, signal_handler);  // Catch abort
     signal(SIGBUS, signal_handler);   // Catch bus error
     
-    // Main loop
+    // main loop
     while (keep_running)
     {
         sleep(1);
     }
     
-    // Cleanup
+    // cleanup
     ProxyBridge_Stop();
     printf("ProxyBridge stopped.\n");
     
