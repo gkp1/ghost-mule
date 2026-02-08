@@ -106,6 +106,7 @@ static BOOL running = FALSE;
 static DWORD g_current_process_id = 0;
 
 static BOOL g_traffic_logging_enabled = TRUE;
+static BOOL g_ipv6_warning_logged = FALSE;
 
 static char g_proxy_host[256] = "";  // Can be IP address or hostname
 static UINT16 g_proxy_port = 0;
@@ -266,11 +267,23 @@ static DWORD WINAPI packet_processor(LPVOID arg)
             continue;
         }
 
-        WinDivertHelperParsePacket(packet, packet_len, &ip_header, NULL, NULL,
+        PWINDIVERT_IPV6HDR ipv6_header = NULL;
+        WinDivertHelperParsePacket(packet, packet_len, &ip_header, &ipv6_header, NULL,
             NULL, NULL, &tcp_header, &udp_header, NULL, NULL, NULL, NULL);
 
         if (ip_header == NULL)
+        {
+            if (ipv6_header != NULL)
+            {
+                if (!g_ipv6_warning_logged)
+                {
+                    log_message("IPv6 traffic detected but not supported. IPv6 connections will not be proxied.");
+                    g_ipv6_warning_logged = TRUE;
+                }
+                WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+            }
             continue;
+        }
 
         if (udp_header != NULL && tcp_header == NULL)
         {
