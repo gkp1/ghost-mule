@@ -3,7 +3,7 @@
 // filter logs based on search
 static void filter_text_view(GtkTextBuffer *buffer, const char *text) {
     if (!buffer) return;
-    
+
     GtkTextIter start, end;
     gtk_text_buffer_get_bounds(buffer, &start, &end);
     gtk_text_buffer_remove_tag_by_name(buffer, "hidden", &start, &end);
@@ -15,23 +15,23 @@ static void filter_text_view(GtkTextBuffer *buffer, const char *text) {
         GtkTextIter line_end = line_start;
         if (!gtk_text_iter_ends_line(&line_end))
             gtk_text_iter_forward_to_line_end(&line_end);
-        
+
         char *line_text = gtk_text_buffer_get_text(buffer, &line_start, &line_end, FALSE);
-        
+
         // search case insensitive
         char *lower_line = g_utf8_strdown(line_text, -1);
         char *lower_search = g_utf8_strdown(text, -1);
 
-        if (!strstr(lower_line, lower_search)) { 
-             GtkTextIter next_line = line_end; 
+        if (!strstr(lower_line, lower_search)) {
+             GtkTextIter next_line = line_end;
              gtk_text_iter_forward_char(&next_line); // include newline
              gtk_text_buffer_apply_tag_by_name(buffer, "hidden", &line_start, &next_line);
         }
-        
+
         g_free(lower_line);
         g_free(lower_search);
         g_free(line_text);
-        
+
         gtk_text_iter_forward_line(&line_start);
     }
 }
@@ -71,7 +71,7 @@ static gboolean update_log_gui(gpointer user_data) {
 
     GtkTextIter end;
     gtk_text_buffer_get_end_iter(log_buffer, &end);
-    
+
     char *time_str = get_current_time_str();
     char full_msg[1200];
     snprintf(full_msg, sizeof(full_msg), "%s %s\n", time_str, data->message);
@@ -94,11 +94,11 @@ static gboolean update_connection_gui_append(gpointer user_data) {
     if (conn_buffer) {
         GtkTextIter end;
         gtk_text_buffer_get_end_iter(conn_buffer, &end);
-        
+
         char line_buffer[1024];
-        snprintf(line_buffer, sizeof(line_buffer), "%s %s (PID:%u) -> %s:%u via %s\n", 
+        snprintf(line_buffer, sizeof(line_buffer), "%s %s (PID:%u) -> %s:%u via %s\n",
                  data->timestamp, data->process_name, data->pid, data->dest_ip, data->dest_port, data->proxy_info);
-        
+
         gtk_text_buffer_insert(conn_buffer, &end, line_buffer, -1);
 
         trim_buffer_lines(conn_buffer, 100);

@@ -59,7 +59,7 @@ void load_config() {
     while (fgets(line, sizeof(line), f)) {
         // trim newline
         line[strcspn(line, "\r\n")] = 0;
-        
+
         if (strlen(line) == 0 || line[0] == '#') continue;
 
         if (strcmp(line, "[SETTINGS]") == 0) { section = 1; continue; }
@@ -69,7 +69,7 @@ void load_config() {
             char *val = strchr(line, '=');
             if (!val) continue;
             *val = 0; val++;
-            
+
             if (strcmp(line, "ip") == 0) strncpy(g_proxy_ip, val, sizeof(g_proxy_ip) - 1);
             else if (strcmp(line, "port") == 0) g_proxy_port = atoi(val);
             else if (strcmp(line, "type") == 0) g_proxy_type = atoi(val);
@@ -84,7 +84,7 @@ void load_config() {
             char *p = line;
             char *token;
             int idx = 0;
-            
+
             while ((token = strsep(&p, "|")) != NULL) {
                 switch(idx) {
                     case 0: rule->id = atoi(token); break;
@@ -97,7 +97,7 @@ void load_config() {
                 }
                 idx++;
             }
-            
+
             if (idx >= 4) {
                g_rules_list = g_list_append(g_rules_list, rule);
             } else {
