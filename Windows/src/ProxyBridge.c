@@ -265,11 +265,19 @@ static DWORD WINAPI packet_processor(LPVOID arg)
             continue;
         }
 
-        WinDivertHelperParsePacket(packet, packet_len, &ip_header, NULL, NULL,
+        PWINDIVERT_IPV6HDR ipv6_header = NULL;
+        WinDivertHelperParsePacket(packet, packet_len, &ip_header, &ipv6_header, NULL,
             NULL, NULL, &tcp_header, &udp_header, NULL, NULL, NULL, NULL);
 
         if (ip_header == NULL)
+        {
+            // IPv6 traffic pass directly without proxying
+            if (ipv6_header != NULL)
+            {
+                WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+            }
             continue;
+        }
 
         if (udp_header != NULL && tcp_header == NULL)
         {
