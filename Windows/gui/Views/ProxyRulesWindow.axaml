@@ -48,6 +48,15 @@
                             </StackPanel>
                         </Button.Content>
                     </Button>
+                    <Button Command="{Binding DeleteSelectedRulesCommand}"
+                            Classes="secondary"
+                            Padding="12,8"
+                            IsEnabled="{Binding HasSelectedRules}">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock Text="🗑" FontSize="14"/>
+                            <TextBlock Text="Delete Selected"/>
+                        </StackPanel>
+                    </Button>
                     <Button Command="{Binding ExportRulesCommand}"
                             Classes="secondary"
                             Padding="12,8"

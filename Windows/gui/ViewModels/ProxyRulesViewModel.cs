@@ -87,6 +87,7 @@ public class ProxyRulesViewModel : ViewModelBase
     public ICommand ToggleSelectAllCommand { get; }
     public ICommand ExportRulesCommand { get; }
     public ICommand ImportRulesCommand { get; }
+    public ICommand DeleteSelectedRulesCommand { get; }
 
     public bool HasSelectedRules => ProxyRules.Any(r => r.IsSelected);
     public bool AllRulesSelected => ProxyRules.Any() && ProxyRules.All(r => r.IsSelected);
@@ -313,6 +314,33 @@ public class ProxyRulesViewModel : ViewModelBase
             {
                 await ShowMessageAsync("Import Failed", $"Failed to import rules: {ex.Message}");
             }
+        });
+
+        DeleteSelectedRulesCommand = new RelayCommand(async () =>
+        {
+            var selectedRules = ProxyRules.Where(r => r.IsSelected).ToList();
+            if (selectedRules.Count == 0)
+                return;
+
+            var confirmMsg = selectedRules.Count == 1 
+                ? $"Delete 1 selected rule?"
+                : $"Delete {selectedRules.Count} selected rules?";
+
+            var confirmed = await ShowConfirmDialogAsync("Delete Selected Rules", confirmMsg);
+            if (!confirmed)
+                return;
+
+            foreach (var rule in selectedRules)
+            {
+                if (_proxyService != null && _proxyService.DeleteRule(rule.RuleId))
+                {
+                    ProxyRules.Remove(rule);
+                }
+            }
+
+            _onConfigChanged?.Invoke();
+            OnPropertyChanged(nameof(HasSelectedRules));
+            OnPropertyChanged(nameof(AllRulesSelected));
         });
     }
 
