@@ -2393,6 +2393,92 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_na
     return FALSE;
 }
 
+PROXYBRIDGE_API UINT32 ProxyBridge_GetRulePosition(UINT32 rule_id)
+{
+    if (rule_id == 0)
+        return 0;
+
+    UINT32 position = 1;
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        if (rule->rule_id == rule_id)
+            return position;
+        position++;
+        rule = rule->next;
+    }
+    return 0;
+}
+
+PROXYBRIDGE_API BOOL ProxyBridge_MoveRuleToPosition(UINT32 rule_id, UINT32 new_position)
+{
+    if (rule_id == 0 || new_position == 0)
+        return FALSE;
+
+    // first rule and remove it from current position
+    PROCESS_RULE *rule = rules_list;
+    PROCESS_RULE *prev = NULL;
+
+    while (rule != NULL)
+    {
+        if (rule->rule_id == rule_id)
+            break;
+        prev = rule;
+        rule = rule->next;
+    }
+
+    if (rule == NULL)
+        return FALSE;
+
+    // Remove from current position
+    if (prev == NULL)
+    {
+        rules_list = rule->next;
+    }
+    else
+    {
+        prev->next = rule->next;
+    }
+
+    // Insert at new position
+    if (new_position == 1)
+    {
+        // Insert at head
+        rule->next = rules_list;
+        rules_list = rule;
+    }
+    else
+    {
+        // taken from stackflow
+        PROCESS_RULE *current = rules_list;
+        UINT32 pos = 1;
+
+        while (current != NULL && pos < new_position - 1)
+        {
+            current = current->next;
+            pos++;
+        }
+
+        if (current == NULL)
+        {
+            // position is beyond list end we can append to tail
+            current = rules_list;
+            while (current->next != NULL)
+                current = current->next;
+            current->next = rule;
+            rule->next = NULL;
+        }
+        else
+        {
+            rule->next = current->next;
+            current->next = rule;
+        }
+    }
+
+    log_message("Moved rule ID %u to position %u", rule_id, new_position);
+    return TRUE;
+}
+
 PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password)
 {
     if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)

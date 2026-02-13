@@ -96,6 +96,14 @@ public class ProxyRulesViewModel : ViewModelBase
         _window = window;
     }
 
+    public bool MoveRuleToPosition(uint ruleId, uint newPosition)
+    {
+        if (_proxyService == null)
+            return false;
+
+        return _proxyService.MoveRuleToPosition(ruleId, newPosition);
+    }
+
     private void ResetRuleForm()
     {
         NewProcessName = "*";

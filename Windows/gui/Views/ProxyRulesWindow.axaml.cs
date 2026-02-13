@@ -4,6 +4,7 @@ using System.Globalization;
 using Avalonia.Controls;
 using Avalonia.Data.Converters;
 using Avalonia.Interactivity;
+using Avalonia.Input;
 using ProxyBridge.GUI.ViewModels;
 
 namespace ProxyBridge.GUI.Views;
@@ -48,6 +49,12 @@ public partial class ProxyRulesWindow : Window
         }
 
         this.DataContextChanged += ProxyRulesWindow_DataContextChanged;
+
+        if (this.FindControl<ItemsControl>("RulesItemsControl") is ItemsControl itemsControl)
+        {
+            itemsControl.AddHandler(DragDrop.DropEvent, Rules_Drop);
+            itemsControl.AddHandler(DragDrop.DragOverEvent, Rules_DragOver);
+        }
     }
 
     private void ProxyRulesWindow_DataContextChanged(object? sender, EventArgs e)
@@ -149,6 +156,72 @@ public partial class ProxyRulesWindow : Window
             DataContext is ProxyRulesViewModel vm)
         {
             vm.NewProtocol = tag;
+        }
+    }
+
+    private async void Rule_PointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (sender is not Border border || border.DataContext is not ProxyRule rule)
+            return;
+
+        var dragData = new DataObject();
+        dragData.Set("DraggedRule", rule);
+
+        var result = await DragDrop.DoDragDrop(e, dragData, DragDropEffects.Move);
+
+        if (result == DragDropEffects.Move && DataContext is ProxyRulesViewModel vm)
+        {
+            // refsh indices after drag completes
+            for (int i = 0; i < vm.ProxyRules.Count; i++)
+            {
+                vm.ProxyRules[i].Index = i + 1;
+            }
+        }
+    }
+
+    private void Rules_DragOver(object? sender, DragEventArgs e)
+    {
+        e.DragEffects = DragDropEffects.Move;
+    }
+
+    private void Rules_Drop(object? sender, DragEventArgs e)
+    {
+        if (DataContext is not ProxyRulesViewModel vm)
+            return;
+
+        if (e.Data.Get("DraggedRule") is not ProxyRule draggedRule)
+            return;
+
+        if (e.Source is Control control)
+        {
+            var current = control;
+            while (current != null && current is not Border)
+            {
+                current = current.Parent as Control;
+            }
+
+            if (current is Border border && border.DataContext is ProxyRule targetRule)
+            {
+                if (draggedRule.RuleId == targetRule.RuleId)
+                    return;
+
+                int draggedIndex = vm.ProxyRules.IndexOf(draggedRule);
+                int targetIndex = vm.ProxyRules.IndexOf(targetRule);
+
+                if (draggedIndex == -1 || targetIndex == -1 || draggedIndex == targetIndex)
+                    return;
+
+                uint newPosition = (uint)(targetIndex + 1);
+                if (vm.MoveRuleToPosition(draggedRule.RuleId, newPosition))
+                {
+                    vm.ProxyRules.Move(draggedIndex, targetIndex);
+
+                    for (int i = 0; i < vm.ProxyRules.Count; i++)
+                    {
+                        vm.ProxyRules[i].Index = i + 1;
+                    }
+                }
+            }
         }
     }
 }
