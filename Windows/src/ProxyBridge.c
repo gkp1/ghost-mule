@@ -385,15 +385,21 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     {
                         add_connection(src_port, src_ip, dest_ip, dest_port);
 
-                        // dest to rely udp
+                        // redirect to UDP relay server at 127.0.0.1:34011
                         udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
-
-                        // Set destination to localhost (127.0.0.1)
                         ip_header->DstAddr = htonl(INADDR_LOOPBACK);
 
-                        // Keep source IP unchanged
-                        addr.Outbound = FALSE;
+                        // check if source is localhos
+                        BYTE src_first_octet = (ntohl(ip_header->SrcAddr) >> 24) & 0xFF;
+                        BOOL src_is_loopback = (src_first_octet == 127);
 
+                        if (!src_is_loopback)
+                        {
+                            // for non loopback source: mark as inbound
+                            addr.Outbound = FALSE;
+                        }
+                        // for loopback we need keep as outbound (127.x.x.x -> 127.0.0.1)
+                        // for a fucking stupid reason i missed this part for 6 months
                     }
                 }
             }
@@ -427,10 +433,18 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 if (get_connection(dst_port, &orig_dest_ip, &orig_dest_port))
                     tcp_header->SrcPort = htons(orig_dest_port);
 
-                UINT32 temp_addr = ip_header->DstAddr;
-                ip_header->DstAddr = ip_header->SrcAddr;
-                ip_header->SrcAddr = temp_addr;
-                addr.Outbound = FALSE;
+                BYTE src_first = (ntohl(ip_header->SrcAddr) >> 24) & 0xFF;
+                BYTE dst_first = (ntohl(ip_header->DstAddr) >> 24) & 0xFF;
+                BOOL is_loopback = (src_first == 127 && dst_first == 127);
+
+                if (!is_loopback)
+                {
+                    UINT32 temp_addr = ip_header->DstAddr;
+                    ip_header->DstAddr = ip_header->SrcAddr;
+                    ip_header->SrcAddr = temp_addr;
+                    addr.Outbound = FALSE;
+                }
+
 
                 if (tcp_header->Fin || tcp_header->Rst)
                     remove_connection(dst_port);
@@ -442,11 +456,20 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 if (tcp_header->Fin || tcp_header->Rst)
                     remove_connection(src_port);
 
-                UINT32 temp_addr = ip_header->DstAddr;
                 tcp_header->DstPort = htons(g_local_relay_port);
-                ip_header->DstAddr = ip_header->SrcAddr;
-                ip_header->SrcAddr = temp_addr;
-                addr.Outbound = FALSE;
+
+                BYTE src_first = (ntohl(ip_header->SrcAddr) >> 24) & 0xFF;
+                BYTE dst_first = (ntohl(ip_header->DstAddr) >> 24) & 0xFF;
+                BOOL is_loopback = (src_first == 127 && dst_first == 127);
+
+                if (!is_loopback)
+                {
+                    UINT32 temp_addr = ip_header->DstAddr;
+                    ip_header->DstAddr = ip_header->SrcAddr;
+                    ip_header->SrcAddr = temp_addr;
+                    addr.Outbound = FALSE;
+                }
+
             }
             else
             {
@@ -529,11 +552,29 @@ static DWORD WINAPI packet_processor(LPVOID arg)
             {
                 add_connection(src_port, src_ip, orig_dest_ip, orig_dest_port);
 
-                UINT32 temp_addr = ip_header->DstAddr;
                 tcp_header->DstPort = htons(g_local_relay_port);
-                ip_header->DstAddr = ip_header->SrcAddr;
-                ip_header->SrcAddr = temp_addr;
-                addr.Outbound = FALSE;
+
+                // check if this is localhost -> localhost traffic
+                BYTE src_first_octet = (ntohl(ip_header->SrcAddr) >> 24) & 0xFF;
+                BYTE dst_first_octet = (ntohl(ip_header->DstAddr) >> 24) & 0xFF;
+                BOOL is_loopback_to_loopback = (src_first_octet == 127 && dst_first_octet == 127);
+
+                if (is_loopback_to_loopback)
+                {
+                    // for localhost -> localhost just change port, keep as outbound
+                    // dont swap IPs Windows loopback routing needs both to stay 127.x.x.x
+                    log_message("[PACKET] Loopback redirect: 127.x.x.x:%d -> 127.x.x.x:%d (relay port %d)",
+                        ntohs(tcp_header->SrcPort), orig_dest_port, g_local_relay_port);
+                    // addr.Outbound stays TRUE
+                }
+                else
+                {
+                    // for normal traffic: swap IPs and mark as inbound (standard relay behavior)
+                    UINT32 temp_addr = ip_header->DstAddr;
+                    ip_header->DstAddr = ip_header->SrcAddr;
+                    ip_header->SrcAddr = temp_addr;
+                    addr.Outbound = FALSE;
+                }
                 }
             }
         }
@@ -985,13 +1026,13 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
 
 static BOOL is_broadcast_or_multicast(UINT32 ip)
 {
-    // Localhost: 127.0.0.0/8 (127.x.x.x)
+    // note: Localhost (127.x.x.x) is now supported for proxying
+    // This allows intercepting localhost connections for MITM scenarios
+
     BYTE first_octet = (ip >> 0) & 0xFF;
-    if (first_octet == 127)
-        return TRUE;
+    BYTE second_octet = (ip >> 8) & 0xFF;
 
     // APIPA (Link-Local): 169.254.0.0/16 (169.254.x.x)
-    BYTE second_octet = (ip >> 8) & 0xFF;
     if (first_octet == 169 && second_octet == 254)
         return TRUE;
 
@@ -1888,7 +1929,7 @@ static DWORD WINAPI connection_handler(LPVOID arg)
 
     if (connect(socks_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) == SOCKET_ERROR)
     {
-        log_message("Failed to connect to proxy (%d)", WSAGetLastError());
+        log_message("[RELAY] Failed to connect to proxy (%d)", WSAGetLastError());
         closesocket(client_sock);
         closesocket(socks_sock);
         return 0;
@@ -2818,9 +2859,11 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     Sleep(500);
 
     snprintf(filter, sizeof(filter),
-        "(tcp and (outbound or (tcp.DstPort == %d or tcp.SrcPort == %d))) or (udp and (outbound or (udp.DstPort == %d or udp.SrcPort == %d)))",
+        "(tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or (udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)))",
         g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT);
 
+    // Note: Added 'loopback' to filter to capture localhost (127.x.x.x) traffic
+    // This enables proxying local connections for MITM scenarios
     windivert_handle = WinDivertOpen(filter, WINDIVERT_LAYER_NETWORK, priority, 0);
     if (windivert_handle == INVALID_HANDLE_VALUE)
     {
