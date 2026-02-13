@@ -494,12 +494,8 @@ class Program
                 return;
             }
 
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine($"⚠ New version available: {releaseName}");
-            Console.ResetColor();
-            Console.WriteLine();
-
-
+            // Check if Windows installer exists before showing update available
+            // (handles cross-platform releases where v4.0 might be released for Linux only)
             var assets = root.GetProperty("assets").EnumerateArray();
             string? setupUrl = null;
             string? setupName = null;
@@ -519,12 +515,20 @@ class Program
 
             if (string.IsNullOrEmpty(setupUrl))
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("ERROR: Setup installer not found in latest release.");
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"ℹ Version {latestVersionStr} exists but Windows installer not yet available.");
+                Console.WriteLine($"  (Release might be for other platforms only)");
                 Console.ResetColor();
+                Console.WriteLine();
+                Console.WriteLine("You are using the latest version available for Windows.");
                 Console.WriteLine($"Visit: https://github.com/{repoOwner}/{repoName}/releases/latest");
                 return;
             }
+
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"⚠ New version available: {releaseName}");
+            Console.ResetColor();
+            Console.WriteLine();
 
             Console.WriteLine($"Downloading: {setupName}");
             Console.WriteLine($"From: {setupUrl}");

@@ -45,11 +45,17 @@ public class UpdateService
                  a.Name.Contains("installer", StringComparison.OrdinalIgnoreCase) ||
                  a.Name.Contains("ProxyBridge", StringComparison.OrdinalIgnoreCase)));
 
+            // Only mark update as available if:
+            // 1. Version is newer AND
+            // 2. Windows installer (.exe) exists in release (platform-specific check)
+            var hasWindowsInstaller = setupAsset != null && !string.IsNullOrEmpty(setupAsset.BrowserDownloadUrl);
+            var isNewerVersion = IsNewerVersion(latestVersion, currentVersion);
+
             return new VersionInfo
             {
                 CurrentVersion = currentVersion,
                 LatestVersion = latestVersion,
-                IsUpdateAvailable = IsNewerVersion(latestVersion, currentVersion),
+                IsUpdateAvailable = isNewerVersion && hasWindowsInstaller,
                 LatestVersionString = release?.TagName ?? "Unknown",
                 CurrentVersionString = FormatVersion(currentVersion),
                 DownloadUrl = setupAsset?.BrowserDownloadUrl,
