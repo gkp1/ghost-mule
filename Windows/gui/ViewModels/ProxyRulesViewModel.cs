@@ -322,7 +322,7 @@ public class ProxyRulesViewModel : ViewModelBase
             if (selectedRules.Count == 0)
                 return;
 
-            var confirmMsg = selectedRules.Count == 1 
+            var confirmMsg = selectedRules.Count == 1
                 ? $"Delete 1 selected rule?"
                 : $"Delete {selectedRules.Count} selected rules?";
 
