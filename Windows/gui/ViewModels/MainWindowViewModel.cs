@@ -122,6 +122,7 @@ public class MainWindowViewModel : ViewModelBase
             _activityLogTimer.Start();
 
             _proxyService.SetDnsViaProxy(_dnsViaProxy);
+            _proxyService.SetLocalhostViaProxy(_localhostViaProxy);
             if (!string.IsNullOrEmpty(_currentProxyIp) &&
                 !string.IsNullOrEmpty(_currentProxyPort) &&
                 ushort.TryParse(_currentProxyPort, out ushort portNum))
@@ -288,6 +289,20 @@ public class MainWindowViewModel : ViewModelBase
         }
     }
 
+    private bool _localhostViaProxy = false;  // Default: disabled for security
+    public bool LocalhostViaProxy
+    {
+        get => _localhostViaProxy;
+        set
+        {
+            if (SetProperty(ref _localhostViaProxy, value))
+            {
+                _proxyService?.SetLocalhostViaProxy(value);
+                SaveConfigurationInternal();
+            }
+        }
+    }
+
     private bool _isTrafficLoggingEnabled = true;
     public bool IsTrafficLoggingEnabled
     {
@@ -362,6 +377,7 @@ public class MainWindowViewModel : ViewModelBase
     public ICommand ShowAboutCommand { get; }
     public ICommand CheckForUpdatesCommand { get; }
     public ICommand ToggleDnsViaProxyCommand { get; }
+    public ICommand ToggleLocalhostViaProxyCommand { get; }
     public ICommand ToggleTrafficLoggingCommand { get; }
     public ICommand ToggleCloseToTrayCommand { get; }
     public ICommand ToggleStartWithWindowsCommand { get; }
@@ -499,6 +515,11 @@ public class MainWindowViewModel : ViewModelBase
         ToggleDnsViaProxyCommand = new RelayCommand(() =>
         {
             DnsViaProxy = !DnsViaProxy;
+        });
+
+        ToggleLocalhostViaProxyCommand = new RelayCommand(() =>
+        {
+            LocalhostViaProxy = !LocalhostViaProxy;
         });
 
         ToggleTrafficLoggingCommand = new RelayCommand(() =>
@@ -707,6 +728,7 @@ public class MainWindowViewModel : ViewModelBase
             _currentProxyPassword = config.ProxyPassword ?? "";
 
             DnsViaProxy = config.DnsViaProxy;
+            LocalhostViaProxy = config.LocalhostViaProxy;
             CloseToTray = config.CloseToTray;
             IsTrafficLoggingEnabled = config.IsTrafficLoggingEnabled;
 
@@ -763,6 +785,7 @@ public class MainWindowViewModel : ViewModelBase
                 ProxyUsername = _currentProxyUsername,
                 ProxyPassword = _currentProxyPassword,
                 DnsViaProxy = _dnsViaProxy,
+                LocalhostViaProxy = _localhostViaProxy,
                 IsTrafficLoggingEnabled = _isTrafficLoggingEnabled,
                 Language = _currentLanguage,
                 CloseToTray = _closeToTray,

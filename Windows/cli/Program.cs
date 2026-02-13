@@ -108,6 +108,11 @@ class Program
             description: "Route DNS queries through proxy (default: true)",
             getDefaultValue: () => true);
 
+        var localhostViaProxyOption = new Option<bool>(
+            name: "--localhost-via-proxy",
+            description: "Route localhost traffic through proxy (default: false, most proxies block localhost for SSRF prevention, local traffic to remote proxy will cause issues)",
+            getDefaultValue: () => false);
+
         var verboseOption = new Option<int>(
             name: "--verbose",
             description: "Logging verbosity level\n" +
@@ -125,6 +130,7 @@ class Program
             ruleOption,
             ruleFileOption,
             dnsViaProxyOption,
+            localhostViaProxyOption,
             verboseOption
         };
 
@@ -135,10 +141,10 @@ class Program
             await CheckAndUpdate();
         });
 
-        rootCommand.SetHandler(async (proxyUrl, rules, ruleFile, dnsViaProxy, verbose) =>
+        rootCommand.SetHandler(async (proxyUrl, rules, ruleFile, dnsViaProxy, localhostViaProxy, verbose) =>
         {
-            await RunProxyBridge(proxyUrl, rules, ruleFile, dnsViaProxy, verbose);
-        }, proxyOption, ruleOption, ruleFileOption, dnsViaProxyOption, verboseOption);
+            await RunProxyBridge(proxyUrl, rules, ruleFile, dnsViaProxy, localhostViaProxy, verbose);
+        }, proxyOption, ruleOption, ruleFileOption, dnsViaProxyOption, localhostViaProxyOption, verboseOption);
 
         if (args.Contains("--help") || args.Contains("-h") || args.Contains("-?"))
         {
@@ -148,7 +154,7 @@ class Program
         return await rootCommand.InvokeAsync(args);
     }
 
-    private static async Task<int> RunProxyBridge(string proxyUrl, string[] rules, string? ruleFile, bool dnsViaProxy, int verboseLevel)
+    private static async Task<int> RunProxyBridge(string proxyUrl, string[] rules, string? ruleFile, bool dnsViaProxy, bool localhostViaProxy, int verboseLevel)
     {
         _verboseLevel = verboseLevel;
         ShowBanner();
@@ -201,6 +207,7 @@ class Program
                 Console.WriteLine($"Proxy Auth: {proxyInfo.Username}:***");
             }
             Console.WriteLine($"DNS via Proxy: {(dnsViaProxy ? "Enabled" : "Disabled")}");
+            Console.WriteLine($"Localhost via Proxy: {(localhostViaProxy ? "Enabled" : "Disabled (Security: most proxies block localhost)")}");
 
             if (!ProxyBridgeNative.ProxyBridge_SetProxyConfig(
                 proxyInfo.Type,
@@ -214,6 +221,7 @@ class Program
             }
 
             ProxyBridgeNative.ProxyBridge_SetDnsViaProxy(dnsViaProxy);
+            ProxyBridgeNative.ProxyBridge_SetLocalhostViaProxy(localhostViaProxy);
 
             if (parsedRules.Count > 0)
             {

@@ -128,6 +128,11 @@ public class ProxyBridgeService : IDisposable
         ProxyBridgeNative.ProxyBridge_SetDnsViaProxy(enable);
     }
 
+    public void SetLocalhostViaProxy(bool enable)
+    {
+        ProxyBridgeNative.ProxyBridge_SetLocalhostViaProxy(enable);
+    }
+
     public static void SetTrafficLoggingEnabled(bool enable)
     {
         ProxyBridgeNative.ProxyBridge_SetTrafficLoggingEnabled(enable);

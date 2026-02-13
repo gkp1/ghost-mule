@@ -221,6 +221,14 @@
                                       Margin="0"/>
                         </MenuItem.Icon>
                     </MenuItem>
+                    <MenuItem Header="{Binding Loc.MenuLocalhostViaProxy}"
+                              Command="{Binding ToggleLocalhostViaProxyCommand}">
+                        <MenuItem.Icon>
+                            <CheckBox IsChecked="{Binding LocalhostViaProxy}"
+                                      IsHitTestVisible="False"
+                                      Margin="0"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
                 </MenuItem>
                 <MenuItem Header="{Binding Loc.MenuSettings}">
                     <MenuItem Header="{Binding Loc.MenuCloseToTray}"
