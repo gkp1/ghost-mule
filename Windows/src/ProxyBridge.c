@@ -113,6 +113,7 @@ static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
 static char g_proxy_username[256] = "";
 static char g_proxy_password[256] = "";
 static BOOL g_dns_via_proxy = TRUE;
+static BOOL g_localhost_via_proxy = FALSE;  // default disabled for security - most proxy server block localhost for ssrf and also many app might not work if localhost trafic goes to remote server if proxy server is on diffrent machine
 static LogCallback g_log_callback = NULL;
 static ConnectionCallback g_connection_callback = NULL;
 
@@ -328,6 +329,11 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     else
                         action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE, &pid);
 
+                    // override PROXY to DIRECT if localhost proxy is disabled and destination is localhost
+                    BYTE dest_first_octet = (dest_ip >> 0) & 0xFF;
+                    if (action == RULE_ACTION_PROXY && !g_localhost_via_proxy && dest_first_octet == 127)
+                        action = RULE_ACTION_DIRECT;
+
                     // Override PROXY to DIRECT for critical IPs and ports
                     if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(dest_ip))
                         action = RULE_ACTION_DIRECT;
@@ -492,6 +498,10 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     action = RULE_ACTION_DIRECT;
                 else
                     action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE, &pid);
+
+                BYTE orig_dest_first_octet = (orig_dest_ip >> 0) & 0xFF;
+                if (action == RULE_ACTION_PROXY && !g_localhost_via_proxy && orig_dest_first_octet == 127)
+                    action = RULE_ACTION_DIRECT;
 
                 // Override PROXY to DIRECT for criticl ips
                 if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(orig_dest_ip))
@@ -2559,6 +2569,12 @@ PROXYBRIDGE_API void ProxyBridge_SetDnsViaProxy(BOOL enable)
 {
     g_dns_via_proxy = enable;
     log_message("DNS routing: %s", enable ? "via proxy" : "direct");
+}
+
+PROXYBRIDGE_API void ProxyBridge_SetLocalhostViaProxy(BOOL enable)
+{
+    g_localhost_via_proxy = enable;
+    log_message("Localhost routing: %s (most proxies block localhost for SSRF prevention)", enable ? "via proxy" : "direct");
 }
 
 PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback)

@@ -42,6 +42,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_MoveRuleToPosition(UINT32 rule_id, UINT32 new_p
 PROXYBRIDGE_API UINT32 ProxyBridge_GetRulePosition(UINT32 rule_id);  // Get current position of rule in list (1-based)
 PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password);  // proxy_ip can be IP address or hostname
 PROXYBRIDGE_API void ProxyBridge_SetDnsViaProxy(BOOL enable);
+PROXYBRIDGE_API void ProxyBridge_SetLocalhostViaProxy(BOOL enable);
 PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback);
 PROXYBRIDGE_API void ProxyBridge_SetConnectionCallback(ConnectionCallback callback);
 PROXYBRIDGE_API void ProxyBridge_SetTrafficLoggingEnabled(BOOL enable);
