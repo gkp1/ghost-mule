@@ -7,20 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		1B7672912F421AB400B323D6 /* Signing-Config-app.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 1B7672902F421AB400B323D6 /* Signing-Config-app.xcconfig */; };
-		1B7672922F421AB400B323D6 /* Signing-Config-app.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 1B7672902F421AB400B323D6 /* Signing-Config-app.xcconfig */; };
-		1B7672942F421ABA00B323D6 /* Signing-Config-ext.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 1B7672932F421ABA00B323D6 /* Signing-Config-ext.xcconfig */; };
-		1B7672952F421ABA00B323D6 /* Signing-Config-ext.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 1B7672932F421ABA00B323D6 /* Signing-Config-ext.xcconfig */; };
 		8466A1E92EC63C5600A8C2E5 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8466A1E82EC63C5600A8C2E5 /* NetworkExtension.framework */; };
 		8466A1F32EC63C5600A8C2E5 /* com.interceptsuite.ProxyBridge.extension.systemextension in Embed System Extensions */ = {isa = PBXBuildFile; fileRef = 8466A1E62EC63C5600A8C2E5 /* com.interceptsuite.ProxyBridge.extension.systemextension */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		846F78F92F14204F00C94754 /* Signing-Config-ext.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 846F78F82F14204F00C94754 /* Signing-Config-ext.xcconfig */; };
-		846F78FA2F14204F00C94754 /* Signing-Config-ext.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 846F78F82F14204F00C94754 /* Signing-Config-ext.xcconfig */; };
-		84AFF4672F23CAC8007CF0B0 /* Signing-Config-app.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 84AFF4662F23CAC8007CF0B0 /* Signing-Config-app.xcconfig */; };
-		84AFF4682F23CAC8007CF0B0 /* Signing-Config-app.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 84AFF4662F23CAC8007CF0B0 /* Signing-Config-app.xcconfig */; };
-		84AFF46A2F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 84AFF4692F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig */; };
-		84AFF46B2F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 84AFF4692F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig */; };
-		84B1D8012F141B2300D0E39B /* Signing-Config-app.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 84B1D8002F141B2300D0E39B /* Signing-Config-app.xcconfig */; };
-		84B1D8022F141B2300D0E39B /* Signing-Config-app.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 84B1D8002F141B2300D0E39B /* Signing-Config-app.xcconfig */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -229,12 +217,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				846F78FA2F14204F00C94754 /* Signing-Config-ext.xcconfig in Resources */,
-				84AFF46B2F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig in Resources */,
-				1B7672912F421AB400B323D6 /* Signing-Config-app.xcconfig in Resources */,
-				84AFF4672F23CAC8007CF0B0 /* Signing-Config-app.xcconfig in Resources */,
-				84B1D8012F141B2300D0E39B /* Signing-Config-app.xcconfig in Resources */,
-				1B7672952F421ABA00B323D6 /* Signing-Config-ext.xcconfig in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -242,12 +224,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1B7672942F421ABA00B323D6 /* Signing-Config-ext.xcconfig in Resources */,
-				846F78F92F14204F00C94754 /* Signing-Config-ext.xcconfig in Resources */,
-				84B1D8022F141B2300D0E39B /* Signing-Config-app.xcconfig in Resources */,
-				84AFF46A2F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig in Resources */,
-				84AFF4682F23CAC8007CF0B0 /* Signing-Config-app.xcconfig in Resources */,
-				1B7672922F421AB400B323D6 /* Signing-Config-app.xcconfig in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
