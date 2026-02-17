@@ -1197,30 +1197,63 @@ class AppProxyProvider: NETransparentProxyProvider {
     
     private func findMatchingRule(bundleId: String, processName: String?, destination: String, port: UInt16, connectionProtocol: RuleProtocol, checkIpPort: Bool) -> ProxyRule? {
         rulesLock.lock()
-        defer { rulesLock.unlock() }
+        let currentRules = rules
+        rulesLock.unlock()
         
-        for rule in rules {
+        var wildcardRule: ProxyRule? = nil
+        
+        for rule in currentRules {
             guard rule.enabled else { continue }
             
+            // check protocol firstß
             if rule.ruleProtocol != .both && rule.ruleProtocol != connectionProtocol {
                 continue
             }
             
-            if !rule.matchesProcess(bundleId: bundleId, processName: processName) {
-                continue
-            }
+            // if this is a wildcard process rule
+            let isWildcardProcess = (rule.processNames == "*" || rule.processNames.isEmpty)
             
-            if checkIpPort {
-                if !rule.matchesIP(destination) {
+            if isWildcardProcess {
+                // wildcard has specific filters
+                let hasIpFilter = (rule.targetHosts != "*" && !rule.targetHosts.isEmpty)
+                let hasPortFilter = (rule.targetPorts != "*" && !rule.targetPorts.isEmpty)
+                
+                if hasIpFilter || hasPortFilter {
+                    // wildcard with filters - check immediately
+                    if checkIpPort {
+                        if rule.matchesIP(destination) && rule.matchesPort(port) {
+                            return rule
+                        }
+                    } else {
+                        // for UDP without destination info, skip filtered wildcards
+                    }
                     continue
                 }
                 
-                if !rule.matchesPort(port) {
-                    continue
+                // Fully wildcard rule - defer it (save first one only)
+                if wildcardRule == nil {
+                    wildcardRule = rule
                 }
+                continue
             }
             
-            return rule
+            // Specific process rule - check if it matches
+            if rule.matchesProcess(bundleId: bundleId, processName: processName) {
+                // Process matched! Check IP and port filters
+                if checkIpPort {
+                    if rule.matchesIP(destination) && rule.matchesPort(port) {
+                        return rule
+                    }
+                } else {
+                    // For UDP without destination info, match on process only
+                    return rule
+                }
+            }
+        }
+        
+        // No specific rule matched, use deferred wildcard if available
+        if let wildcardRule = wildcardRule {
+            return wildcardRule
         }
         
         return nil
