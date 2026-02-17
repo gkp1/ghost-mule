@@ -135,11 +135,40 @@ struct ProxyRule: Codable {
         return false
     }
     
+    private static func ipToInteger(_ ipString: String) -> UInt32? {
+        let octets = ipString.components(separatedBy: ".")
+        guard octets.count == 4 else { return nil }
+        
+        var result: UInt32 = 0
+        for octet in octets {
+            guard let value = UInt8(octet) else { return nil }
+            result = (result << 8) | UInt32(value)
+        }
+        return result
+    }
+    
     private static func matchIPPattern(_ pattern: String, ipString: String) -> Bool {
         if pattern.isEmpty || pattern == "*" {
             return true
         }
         
+        // Check for IP range (e.g., 192.168.1.1-192.168.1.254)
+        if pattern.contains("-") {
+            let parts = pattern.components(separatedBy: "-")
+            if parts.count == 2 {
+                let startIP = parts[0].trimmingCharacters(in: .whitespaces)
+                let endIP = parts[1].trimmingCharacters(in: .whitespaces)
+                
+                if let startInt = ipToInteger(startIP),
+                   let endInt = ipToInteger(endIP),
+                   let targetInt = ipToInteger(ipString) {
+                    return targetInt >= startInt && targetInt <= endInt
+                }
+            }
+            return false
+        }
+        
+        // Wildcard matching (e.g., 192.168.1.*)
         let patternOctets = pattern.components(separatedBy: ".")
         let ipOctets = ipString.components(separatedBy: ".")
         
