@@ -3,7 +3,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="3.1.0"
+VERSION="3.2.0"
 
 if [ -f "$SCRIPT_DIR/.env" ]; then
     source "$SCRIPT_DIR/.env"
@@ -26,7 +26,7 @@ echo "Creating installer package..."
 pkgbuild \
     --root build/component \
     --identifier com.interceptsuite.ProxyBridge \
-    --version 3.1.0 \
+    --version 3.2.0 \
     --install-location /Applications \
     build/temp.pkg
 
@@ -45,7 +45,7 @@ cat > build/distribution.xml << 'EOF'
     <choice id="com.interceptsuite.ProxyBridge" visible="false">
         <pkg-ref id="com.interceptsuite.ProxyBridge"/>
     </choice>
-    <pkg-ref id="com.interceptsuite.ProxyBridge" version="3.1.0" onConclusion="none">temp.pkg</pkg-ref>
+    <pkg-ref id="com.interceptsuite.ProxyBridge" version="3.2.0" onConclusion="none">temp.pkg</pkg-ref>
 </installer-gui-script>
 EOF
 
