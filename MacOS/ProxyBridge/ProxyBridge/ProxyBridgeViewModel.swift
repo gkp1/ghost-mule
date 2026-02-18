@@ -127,6 +127,26 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     }
     
     private func installAndStartProxy() {
+        // Stop any existing tunnel first so macOS replaces the running extension
+        // binary with the newly installed one instead of reusing the old cached process.
+        NETransparentProxyManager.loadAllFromPreferences { [weak self] managers, error in
+            guard let self = self else { return }
+            
+            if let existing = managers?.first,
+               let session = existing.connection as? NETunnelProviderSession,
+               session.status != .disconnected && session.status != .invalid {
+                session.stopTunnel()
+                // Brief pause to let the old extension fully terminate
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    self.submitExtensionActivationRequest()
+                }
+            } else {
+                self.submitExtensionActivationRequest()
+            }
+        }
+    }
+    
+    private func submitExtensionActivationRequest() {
         let request = OSSystemExtensionRequest.activationRequest(
             forExtensionWithIdentifier: extensionIdentifier,
             queue: .main
