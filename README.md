@@ -4,9 +4,10 @@
   <img src="img/logo.png" alt="ProxyBridge Logo" />
 </p>
 
-ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alternative) that provides transparent proxy routing for applications on **Windows** and **macOS**. It redirects TCP and UDP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. ProxyBridge fully supports both TCP and UDP proxy routing and works at the system level, making it compatible with proxy-unaware applications without requiring any configuration changes.
+ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alternative) that provides transparent proxy routing for applications on **Windows**, **macOS**, and **Linux**. It redirects TCP and UDP traffic from specific processes through SOCKS5 or HTTP proxies, with the ability to route, block, or allow traffic on a per-application basis. ProxyBridge fully supports both TCP and UDP proxy routing and works at the system level, making it compatible with proxy-unaware applications without requiring any configuration changes.
 
-🚀 **Need advanced traffic analysis?** Check out [**InterceptSuite**](https://github.com/InterceptSuite/InterceptSuite) - our comprehensive MITM proxy for analyzing TLS, TCP, UDP, DTLS traffic. Perfect for security testing, network debugging, and system administration!
+> [!TIP]
+> **Need advanced traffic analysis?** Check out [**InterceptSuite**](https://github.com/InterceptSuite/InterceptSuite) - our comprehensive MITM proxy for analyzing TLS, TCP, UDP, DTLS traffic. Perfect for security testing, network debugging, and system administration!
 
 ## Table of Contents
 
@@ -28,7 +29,7 @@ ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alte
 
 ## Features
 
-- **Cross-platform** - Available for Windows and macOS
+- **Cross-platform** - Available for Windows, macOS and Linux
 - **Dual interface** - Feature-rich GUI and powerful CLI for all use cases
 - **Process-based traffic control** - Route, block, or allow traffic for specific applications
 - **Universal compatibility** - Works with proxy-unaware applications
@@ -54,14 +55,14 @@ ProxyBridge is a lightweight, open-source universal proxy client (Proxifier alte
 > - Official Website: [https://interceptsuite.com/download/proxybridge](https://interceptsuite.com/download/proxybridge)
 >
 > If you prefer not to use prebuilt binaries, you may safely build ProxyBridge yourself by following the **Contribution Guide** and compiling directly from the **official source code**.
-> 
+>
 > ProxyBridge does not communicate with any external servers except the GitHub API for update checks (triggered only on app launch or manual update checks);
 
 
 
 ## Platform Documentation
 
-ProxyBridge is available for both Windows and macOS, with platform-specific implementations:
+ProxyBridge is available for Windows, macOS, and Linux, with platform-specific implementations:
 
 ### 📘 Windows
 - **[View Full Windows Documentation](Windows/README.md)**
@@ -77,6 +78,15 @@ ProxyBridge is available for both Windows and macOS, with platform-specific impl
 - **Distribution**: Direct download (.pkg installer) from [Releases](https://github.com/InterceptSuite/ProxyBridge/releases)
 - **Requirements**: macOS 13.0 (Ventura) or later, Apple Silicon (ARM) or Intel
 - **GUI**: Native SwiftUI interface
+
+### 📙 Linux
+- **[View Full Linux Documentation](Linux/README.md)**
+- **Technology**: Netfilter NFQUEUE for kernel-level packet interception
+- **Distribution**: TAR.GZ archive or one-command install from [Releases](https://github.com/InterceptSuite/ProxyBridge/releases)
+- **Requirements**: Linux kernel with NFQUEUE support, root privileges (not compatible with WSL1/WSL2)
+- **GUI**: GTK3-based interface (optional)
+- **CLI**: Full-featured command-line tool with rule support
+- **Quick Install**: `curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh && sudo bash deploy.sh`
 
 ## Screenshots
 
@@ -142,6 +152,42 @@ ProxyBridge is available for both Windows and macOS, with platform-specific impl
   <em>ProxyBridge CLI Interface</em>
 </p>
 
+### Linux
+
+#### GUI
+
+<p align="center">
+  <img src="img/ProxyBridge-linux.png" alt="ProxyBridge Linux Main Interface" width="800"/>
+  <br/>
+  <em>ProxyBridge GUI - Main Interface</em>
+</p>
+
+<p align="center">
+  <img src="img/proxy-setting-linux.png" alt="Proxy Settings Linux" width="800"/>
+  <br/>
+  <em>Proxy Settings Configuration</em>
+</p>
+
+<p align="center">
+  <img src="img/proxy-rule-linux.png" alt="Proxy Rules Linux" width="800"/>
+  <br/>
+  <em>Proxy Rules Management</em>
+</p>
+
+<p align="center">
+  <img src="img/proxy-rule2-linux.png" alt="Add/Edit Rule Linux" width="800"/>
+  <br/>
+  <em>Add/Edit Proxy Rule</em>
+</p>
+
+#### CLI
+
+<p align="center">
+  <img src="img/ProxyBridge_CLI-linux.png" alt="ProxyBridge Linux CLI" width="800"/>
+  <br/>
+  <em>ProxyBridge CLI Interface</em>
+</p>
+
 ## Use Cases
 
 - Redirect proxy-unaware applications (games, desktop apps) through InterceptSuite/Burp Suite for security testing
@@ -170,3 +216,6 @@ The Windows GUI is built using [Avalonia UI](https://avaloniaui.net/) - a cross-
 
 **macOS Implementation:**
 Built using Apple's Network Extension framework for transparent proxy capabilities on macOS.
+
+**Linux Implementation:**
+Built using Linux Netfilter NFQUEUE for kernel-level packet interception and iptables for traffic redirection. The GUI uses GTK3 for native Linux desktop integration.
