@@ -63,10 +63,13 @@ class UpdateService {
                  asset.name.lowercased().contains("installer"))
             }
 
+            // a macOS pkg installer in the release is valid update
+            let isUpdateAvailable = isNewerVersion(latestVersion, currentVersion) && pkgAsset != nil
+
             return VersionInfo(
                 currentVersion: currentVersion,
                 latestVersion: release.tagName,
-                isUpdateAvailable: isNewerVersion(latestVersion, currentVersion),
+                isUpdateAvailable: isUpdateAvailable,
                 downloadUrl: pkgAsset?.browserDownloadUrl,
                 fileName: pkgAsset?.name,
                 error: nil
