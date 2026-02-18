@@ -1208,7 +1208,11 @@ class AppProxyProvider: NETransparentProxyProvider {
     private func relayClientToProxy(clientFlow: NEAppProxyTCPFlow, proxyConnection: NWTCPConnection) {
         clientFlow.readData { [weak self] data, error in
             if let error = error {
-                self?.log("Client read error: \(error.localizedDescription)", level: "ERROR")
+                // ignore expected errors
+                let code = (error as NSError).code
+                if code != 57 && code != 54 && code != 89 {
+                    self?.log("Client read error: \(error.localizedDescription)", level: "ERROR")
+                }
                 proxyConnection.cancel()
                 return
             }
@@ -1234,9 +1238,12 @@ class AppProxyProvider: NETransparentProxyProvider {
     private func relayProxyToClient(clientFlow: NEAppProxyTCPFlow, proxyConnection: NWTCPConnection) {
         proxyConnection.readMinimumLength(1, maximumLength: 65536) { [weak self] data, error in
             if let error = error {
-                self?.log("Proxy read error: \(error.localizedDescription)", level: "ERROR")
-                clientFlow.closeReadWithError(error)
-                clientFlow.closeWriteWithError(error)
+                let code = (error as NSError).code
+                if code != 57 && code != 54 && code != 89 {
+                    self?.log("Proxy read error: \(error.localizedDescription)", level: "ERROR")
+                }
+                clientFlow.closeReadWithError(nil)
+                clientFlow.closeWriteWithError(nil)
                 return
             }
             
