@@ -226,8 +226,14 @@ struct ProxyRule: Codable {
 
 class AppProxyProvider: NETransparentProxyProvider {
     
-    private var logQueue: [[String: String]] = []
+    // circular buffer for log queue to avoids O(n) removeFirst() on array
+    private static let logCapacity = 1000
+    private var logBuffer: [[String: String]] = Array(repeating: [:], count: AppProxyProvider.logCapacity)
+    private var logHead = 0  // next read position
+    private var logTail = 0  // next write position
+    private var logCount = 0
     private let logQueueLock = NSLock()
+    private let dateFormatter: ISO8601DateFormatter = ISO8601DateFormatter()
     
     private func getProcessName(from metaData: NEFlowMetaData) -> String? {
         guard let auditTokenData = metaData.sourceAppAuditToken else {
@@ -257,7 +263,11 @@ class AppProxyProvider: NETransparentProxyProvider {
         return processName
     }
     
-    private var trafficLoggingEnabled = true
+    private var _trafficLoggingEnabled: Int32 = 1  // atomic: 1=enabled, 0=disabled
+    private var trafficLoggingEnabled: Bool {
+        get { return OSAtomicAdd32(0, &_trafficLoggingEnabled) != 0 }
+        set { OSAtomicCompareAndSwap32(newValue ? 0 : 1, newValue ? 1 : 0, &_trafficLoggingEnabled) }
+    }
     
     private var rules: [ProxyRule] = []
     private let rulesLock = NSLock()
@@ -271,17 +281,19 @@ class AppProxyProvider: NETransparentProxyProvider {
     private let proxyLock = NSLock()
     
     private func log(_ message: String, level: String = "INFO") {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
         let logEntry: [String: String] = [
-            "timestamp": timestamp,
+            "timestamp": dateFormatter.string(from: Date()),
             "level": level,
             "message": message
         ]
-        
         logQueueLock.lock()
-        logQueue.append(logEntry)
-        if logQueue.count > 1000 {
-            logQueue.removeFirst()
+        logBuffer[logTail] = logEntry
+        logTail = (logTail + 1) % AppProxyProvider.logCapacity
+        if logCount < AppProxyProvider.logCapacity {
+            logCount += 1
+        } else {
+            // Buffer full: advance head to overwrite oldest entry
+            logHead = (logHead + 1) % AppProxyProvider.logCapacity
         }
         logQueueLock.unlock()
     }
@@ -322,9 +334,15 @@ class AppProxyProvider: NETransparentProxyProvider {
         switch action {
         case "getLogs":
             logQueueLock.lock()
-            if !logQueue.isEmpty {
-                let logsToSend = Array(logQueue.prefix(min(100, logQueue.count)))
-                logQueue.removeFirst(logsToSend.count)
+            if logCount > 0 {
+                let batchSize = min(100, logCount)
+                var logsToSend: [[String: String]] = []
+                logsToSend.reserveCapacity(batchSize)
+                for _ in 0..<batchSize {
+                    logsToSend.append(logBuffer[logHead])
+                    logHead = (logHead + 1) % AppProxyProvider.logCapacity
+                    logCount -= 1
+                }
                 logQueueLock.unlock()
                 completionHandler?(try? JSONSerialization.data(withJSONObject: logsToSend))
             } else {
@@ -1301,9 +1319,12 @@ class AppProxyProvider: NETransparentProxyProvider {
         ]
         
         logQueueLock.lock()
-        logQueue.append(logData)
-        if logQueue.count > 1000 {
-            logQueue.removeFirst()
+        logBuffer[logTail] = logData
+        logTail = (logTail + 1) % AppProxyProvider.logCapacity
+        if logCount < AppProxyProvider.logCapacity {
+            logCount += 1
+        } else {
+            logHead = (logHead + 1) % AppProxyProvider.logCapacity
         }
         logQueueLock.unlock()
     }
