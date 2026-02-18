@@ -26,6 +26,9 @@
   <data name="MenuDnsViaProxy" xml:space="preserve">
     <value>DNS通过代理</value>
   </data>
+  <data name="MenuLocalhostViaProxy" xml:space="preserve">
+    <value>本地主机通过代理</value>
+  </data>
   <data name="MenuEnableTrafficLogging" xml:space="preserve">
     <value>启用流量日志</value>
   </data>
@@ -229,7 +232,7 @@
     <value>示例: iexplore.exe; "C:\某个应用.exe"; fire*.exe; *.bin</value>
   </data>
   <data name="ExampleTargetHosts" xml:space="preserve">
-    <value>示例: 127.0.0.1; *.example.com; 192.168.1.*; 10.1.0.0-10.5.255.255</value>
+    <value>示例: 127.0.0.1; 192.168.1.*; 10.1.0.0-10.5.255.255</value>
   </data>
   <data name="ExampleTargetPorts" xml:space="preserve">
     <value>示例: 80; 8000-9000; 3128</value>

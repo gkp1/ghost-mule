@@ -9,14 +9,6 @@
 /* Begin PBXBuildFile section */
 		8466A1E92EC63C5600A8C2E5 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8466A1E82EC63C5600A8C2E5 /* NetworkExtension.framework */; };
 		8466A1F32EC63C5600A8C2E5 /* com.interceptsuite.ProxyBridge.extension.systemextension in Embed System Extensions */ = {isa = PBXBuildFile; fileRef = 8466A1E62EC63C5600A8C2E5 /* com.interceptsuite.ProxyBridge.extension.systemextension */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		846F78F92F14204F00C94754 /* Signing-Config-ext.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 846F78F82F14204F00C94754 /* Signing-Config-ext.xcconfig */; };
-		846F78FA2F14204F00C94754 /* Signing-Config-ext.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 846F78F82F14204F00C94754 /* Signing-Config-ext.xcconfig */; };
-		84AFF4672F23CAC8007CF0B0 /* Signing-Config-app.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 84AFF4662F23CAC8007CF0B0 /* Signing-Config-app.xcconfig */; };
-		84AFF4682F23CAC8007CF0B0 /* Signing-Config-app.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 84AFF4662F23CAC8007CF0B0 /* Signing-Config-app.xcconfig */; };
-		84AFF46A2F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 84AFF4692F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig */; };
-		84AFF46B2F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 84AFF4692F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig */; };
-		84B1D8012F141B2300D0E39B /* Signing-Config-app.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 84B1D8002F141B2300D0E39B /* Signing-Config-app.xcconfig */; };
-		84B1D8022F141B2300D0E39B /* Signing-Config-app.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 84B1D8002F141B2300D0E39B /* Signing-Config-app.xcconfig */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -44,6 +36,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		1B7672902F421AB400B323D6 /* Signing-Config-app.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Signing-Config-app.xcconfig"; sourceTree = "<group>"; };
+		1B7672932F421ABA00B323D6 /* Signing-Config-ext.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Signing-Config-ext.xcconfig"; sourceTree = "<group>"; };
 		8466A1D32EC63B9400A8C2E5 /* ProxyBridge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ProxyBridge.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		8466A1E62EC63C5600A8C2E5 /* com.interceptsuite.ProxyBridge.extension.systemextension */ = {isa = PBXFileReference; explicitFileType = "wrapper.system-extension"; includeInIndex = 0; path = com.interceptsuite.ProxyBridge.extension.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
 		8466A1E82EC63C5600A8C2E5 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
@@ -109,6 +103,8 @@
 				8466A1D42EC63B9400A8C2E5 /* Products */,
 				84AFF4662F23CAC8007CF0B0 /* Signing-Config-app.xcconfig */,
 				84AFF4692F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig */,
+				1B7672902F421AB400B323D6 /* Signing-Config-app.xcconfig */,
+				1B7672932F421ABA00B323D6 /* Signing-Config-ext.xcconfig */,
 			);
 			sourceTree = "<group>";
 		};
@@ -221,10 +217,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				846F78FA2F14204F00C94754 /* Signing-Config-ext.xcconfig in Resources */,
-				84AFF46B2F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig in Resources */,
-				84AFF4672F23CAC8007CF0B0 /* Signing-Config-app.xcconfig in Resources */,
-				84B1D8012F141B2300D0E39B /* Signing-Config-app.xcconfig in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -232,10 +224,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				846F78F92F14204F00C94754 /* Signing-Config-ext.xcconfig in Resources */,
-				84B1D8022F141B2300D0E39B /* Signing-Config-app.xcconfig in Resources */,
-				84AFF46A2F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig in Resources */,
-				84AFF4682F23CAC8007CF0B0 /* Signing-Config-app.xcconfig in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -382,7 +370,8 @@
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
-				ONLY_ACTIVE_ARCH = YES;
+				ONLY_ACTIVE_ARCH = NO;
+				ARCHS = "arm64 x86_64";
 				SDKROOT = macosx;
 				SWIFT_COMPILATION_MODE = wholemodule;
 			};
@@ -398,7 +387,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
@@ -422,7 +410,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 3.1;
+				MARKETING_VERSION = 3.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -438,7 +426,7 @@
 		};
 		8466A1E02EC63B9500A8C2E5 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 84AFF4662F23CAC8007CF0B0 /* Signing-Config-app.xcconfig */;
+			baseConfigurationReference = 1B7672902F421AB400B323D6 /* Signing-Config-app.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -467,7 +455,8 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 3.1;
+				MARKETING_VERSION = 3.2.0;
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]" = "ProxyBridge Prod";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -507,7 +496,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 3.1;
+				MARKETING_VERSION = 3.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.interceptsuite.ProxyBridge.extension;
 				PRODUCT_NAME = "$(inherited)";
 				REGISTER_APP_GROUPS = YES;
@@ -522,7 +511,7 @@
 		};
 		8466A1F72EC63C5600A8C2E5 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 84AFF4692F23CAD5007CF0B0 /* Signing-Config-ext.xcconfig */;
+			baseConfigurationReference = 1B7672932F421ABA00B323D6 /* Signing-Config-ext.xcconfig */;
 			buildSettings = {
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = YES;
@@ -546,7 +535,8 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MARKETING_VERSION = 3.1;
+				MARKETING_VERSION = 3.2.0;
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]" = "ProxyBridge Extension Prod";
 				REGISTER_APP_GROUPS = YES;
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

@@ -1,0 +1,104 @@
+name: Build Linux
+
+on:
+  push:
+    branches: [ master, dev ]
+  pull_request:
+    branches: [ master, dev ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          gcc \
+          make \
+          libnetfilter-queue-dev \
+          libnfnetlink-dev \
+          libgtk-3-dev \
+          pkg-config
+      shell: bash
+
+    - name: Verify dependencies
+      run: |
+        echo "=== Checking GCC ==="
+        gcc --version
+        echo ""
+        echo "=== Checking Make ==="
+        make --version
+        echo ""
+        echo "=== Checking pkg-config ==="
+        pkg-config --version
+        echo ""
+        echo "=== Checking GTK3 ==="
+        pkg-config --modversion gtk+-3.0
+        echo ""
+        echo "=== Checking libnetfilter_queue ==="
+        pkg-config --modversion libnetfilter_queue || echo "Package info not available, but headers should be present"
+      shell: bash
+
+    - name: Build project
+      run: |
+        cd Linux
+        chmod +x build.sh
+        ./build.sh
+      shell: bash
+
+    - name: Verify build output
+      run: |
+        echo "=== Build Output ==="
+        ls -lh Linux/output/
+        echo ""
+        if [ -f "Linux/output/libproxybridge.so" ]; then
+          echo "✓ Library built successfully"
+          file Linux/output/libproxybridge.so
+        else
+          echo "✗ Library build failed"
+          exit 1
+        fi
+        echo ""
+        if [ -f "Linux/output/ProxyBridge" ]; then
+          echo "✓ CLI built successfully"
+          file Linux/output/ProxyBridge
+        else
+          echo "✗ CLI build failed"
+          exit 1
+        fi
+        echo ""
+        if [ -f "Linux/output/ProxyBridgeGUI" ]; then
+          echo "✓ GUI built successfully"
+          file Linux/output/ProxyBridgeGUI
+        else
+          echo "⚠ GUI build skipped (GTK3 not available or build failed)"
+        fi
+      shell: bash
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ProxyBridge-Linux-Build-${{ github.sha }}
+        path: Linux/output/
+        retention-days: 30
+
+    - name: Display build summary
+      run: |
+        echo ""
+        echo "========================================="
+        echo "Build Complete!"
+        echo "========================================="
+        cd Linux/output
+        for file in *; do
+          size=$(du -h "$file" | cut -f1)
+          echo "  $file - $size"
+        done
+        echo "========================================="
+      shell: bash

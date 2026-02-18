@@ -108,6 +108,11 @@ class Program
             description: "Route DNS queries through proxy (default: true)",
             getDefaultValue: () => true);
 
+        var localhostViaProxyOption = new Option<bool>(
+            name: "--localhost-via-proxy",
+            description: "Route localhost traffic through proxy (default: false, most proxies block localhost for SSRF prevention, local traffic to remote proxy will cause issues)",
+            getDefaultValue: () => false);
+
         var verboseOption = new Option<int>(
             name: "--verbose",
             description: "Logging verbosity level\n" +
@@ -125,6 +130,7 @@ class Program
             ruleOption,
             ruleFileOption,
             dnsViaProxyOption,
+            localhostViaProxyOption,
             verboseOption
         };
 
@@ -135,10 +141,10 @@ class Program
             await CheckAndUpdate();
         });
 
-        rootCommand.SetHandler(async (proxyUrl, rules, ruleFile, dnsViaProxy, verbose) =>
+        rootCommand.SetHandler(async (proxyUrl, rules, ruleFile, dnsViaProxy, localhostViaProxy, verbose) =>
         {
-            await RunProxyBridge(proxyUrl, rules, ruleFile, dnsViaProxy, verbose);
-        }, proxyOption, ruleOption, ruleFileOption, dnsViaProxyOption, verboseOption);
+            await RunProxyBridge(proxyUrl, rules, ruleFile, dnsViaProxy, localhostViaProxy, verbose);
+        }, proxyOption, ruleOption, ruleFileOption, dnsViaProxyOption, localhostViaProxyOption, verboseOption);
 
         if (args.Contains("--help") || args.Contains("-h") || args.Contains("-?"))
         {
@@ -148,7 +154,7 @@ class Program
         return await rootCommand.InvokeAsync(args);
     }
 
-    private static async Task<int> RunProxyBridge(string proxyUrl, string[] rules, string? ruleFile, bool dnsViaProxy, int verboseLevel)
+    private static async Task<int> RunProxyBridge(string proxyUrl, string[] rules, string? ruleFile, bool dnsViaProxy, bool localhostViaProxy, int verboseLevel)
     {
         _verboseLevel = verboseLevel;
         ShowBanner();
@@ -201,6 +207,7 @@ class Program
                 Console.WriteLine($"Proxy Auth: {proxyInfo.Username}:***");
             }
             Console.WriteLine($"DNS via Proxy: {(dnsViaProxy ? "Enabled" : "Disabled")}");
+            Console.WriteLine($"Localhost via Proxy: {(localhostViaProxy ? "Enabled" : "Disabled (Security: most proxies block localhost)")}");
 
             if (!ProxyBridgeNative.ProxyBridge_SetProxyConfig(
                 proxyInfo.Type,
@@ -214,6 +221,7 @@ class Program
             }
 
             ProxyBridgeNative.ProxyBridge_SetDnsViaProxy(dnsViaProxy);
+            ProxyBridgeNative.ProxyBridge_SetLocalhostViaProxy(localhostViaProxy);
 
             if (parsedRules.Count > 0)
             {
@@ -421,7 +429,7 @@ class Program
         Console.WriteLine(" | |_) | '__/ _ \\ \\/ / | | | |  _ \\| '__| |/ _` |/ _` |/ _ \\");
         Console.WriteLine(" |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/");
         Console.WriteLine(" |_|   |_|  \\___/_/\\_\\\\__, | |____/|_|  |_|\\__,_|\\__, |\\___|");
-        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "3.1.0";
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "3.2.0";
         Console.WriteLine($"                      |___/                      |___/  V{version}");
         Console.WriteLine();
         Console.WriteLine("  Universal proxy client for Windows applications");
@@ -486,12 +494,8 @@ class Program
                 return;
             }
 
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine($"⚠ New version available: {releaseName}");
-            Console.ResetColor();
-            Console.WriteLine();
-
-
+            // Check if Windows installer exists before showing update available
+            // (handles cross-platform releases where v4.0 might be released for Linux only)
             var assets = root.GetProperty("assets").EnumerateArray();
             string? setupUrl = null;
             string? setupName = null;
@@ -511,12 +515,20 @@ class Program
 
             if (string.IsNullOrEmpty(setupUrl))
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("ERROR: Setup installer not found in latest release.");
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"ℹ Version {latestVersionStr} exists but Windows installer not yet available.");
+                Console.WriteLine($"  (Release might be for other platforms only)");
                 Console.ResetColor();
+                Console.WriteLine();
+                Console.WriteLine("You are using the latest version available for Windows.");
                 Console.WriteLine($"Visit: https://github.com/{repoOwner}/{repoName}/releases/latest");
                 return;
             }
+
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"⚠ New version available: {releaseName}");
+            Console.ResetColor();
+            Console.WriteLine();
 
             Console.WriteLine($"Downloading: {setupName}");
             Console.WriteLine($"From: {setupUrl}");

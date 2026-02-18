@@ -84,6 +84,13 @@ public static class ProxyBridgeNative
         RuleAction action);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern uint ProxyBridge_GetRulePosition(uint ruleId);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ProxyBridge_MoveRuleToPosition(uint ruleId, uint newPosition);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_SetProxyConfig(
         ProxyType type,
@@ -103,6 +110,9 @@ public static class ProxyBridgeNative
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     public static extern void ProxyBridge_SetDnsViaProxy([MarshalAs(UnmanagedType.Bool)] bool enable);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern void ProxyBridge_SetLocalhostViaProxy([MarshalAs(UnmanagedType.Bool)] bool enable);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]

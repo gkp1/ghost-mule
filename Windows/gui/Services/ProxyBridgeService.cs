@@ -113,9 +113,24 @@ public class ProxyBridgeService : IDisposable
         return ProxyBridgeNative.ProxyBridge_EditRule(ruleId, processName, targetHosts, targetPorts, ruleProtocol, ruleAction);
     }
 
+    public uint GetRulePosition(uint ruleId)
+    {
+        return ProxyBridgeNative.ProxyBridge_GetRulePosition(ruleId);
+    }
+
+    public bool MoveRuleToPosition(uint ruleId, uint newPosition)
+    {
+        return ProxyBridgeNative.ProxyBridge_MoveRuleToPosition(ruleId, newPosition);
+    }
+
     public void SetDnsViaProxy(bool enable)
     {
         ProxyBridgeNative.ProxyBridge_SetDnsViaProxy(enable);
+    }
+
+    public void SetLocalhostViaProxy(bool enable)
+    {
+        ProxyBridgeNative.ProxyBridge_SetLocalhostViaProxy(enable);
     }
 
     public static void SetTrafficLoggingEnabled(bool enable)

@@ -410,7 +410,7 @@ struct RuleEditorView: View {
                         label: "Target hosts",
                         placeholder: "*",
                         text: $targetHosts,
-                        hint: "Example: 127.0.0.1; *.example.com; 192.168.1.*; 10.1.0.0-10.5.255.255"
+                        hint: "Example: 127.0.0.1; 192.168.1.*; 10.0.0.1-10.0.0.254"
                     )
                     
                     formField(

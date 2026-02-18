@@ -1,0 +1,268 @@
+#include "gui.h"
+
+// widgets
+GtkWidget *window;
+GtkTextView *conn_view;
+GtkTextBuffer *conn_buffer;
+GtkTextView *log_view;
+GtkTextBuffer *log_buffer;
+GtkWidget *status_bar;
+guint status_context_id;
+
+// default config
+char g_proxy_ip[256] = "";
+uint16_t g_proxy_port = 0;
+ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
+char g_proxy_user[256] = "";
+char g_proxy_pass[256] = "";
+
+GList *g_rules_list = NULL;
+bool g_chk_logging = true;
+bool g_chk_dns = true;
+
+static void on_log_traffic_toggled(GtkCheckMenuItem *item, gpointer data) {
+    bool active = gtk_check_menu_item_get_active(item);
+    ProxyBridge_SetTrafficLoggingEnabled(active);
+    g_chk_logging = active;
+    save_config();
+}
+
+static void on_dns_proxy_toggled(GtkCheckMenuItem *item, gpointer data) {
+    bool active = gtk_check_menu_item_get_active(item);
+    ProxyBridge_SetDnsViaProxy(active);
+    g_chk_dns = active;
+    save_config();
+}
+
+static void on_create_update_script_and_run() {
+    ProxyBridge_Stop();
+    const char *script_url = "https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh";
+    char tmp_dir_tpl[] = "/tmp/pb_update_XXXXXX";
+    char *tmp_dir = mkdtemp(tmp_dir_tpl);
+    if (!tmp_dir) { fprintf(stderr, "Failed to create temp directory for update.\n"); exit(1); }
+    char script_path[512];
+    snprintf(script_path, sizeof(script_path), "%s/deploy.sh", tmp_dir);
+
+    pid_t pid = fork();
+    if (pid == -1) { fprintf(stderr, "Fork failed.\n"); exit(1); }
+    else if (pid == 0) { execlp("curl", "curl", "-s", "-o", script_path, script_url, NULL); _exit(127); }
+    else { int status; waitpid(pid, &status, 0); if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) { fprintf(stderr, "Failed to download update script.\n"); exit(1); } }
+
+    if (chmod(script_path, S_IRWXU) != 0) { perror("chmod failed"); exit(1); }
+    execl("/bin/bash", "bash", script_path, NULL);
+    exit(0);
+}
+
+static void on_check_update(GtkWidget *widget, gpointer data) {
+    const char *url = "https://api.github.com/repos/InterceptSuite/ProxyBridge/releases/latest";
+    char *cmd = g_strdup_printf("curl -s -H \"User-Agent: ProxyBridge-Linux\" %s", url);
+    char *standard_output = NULL;
+    char *standard_error = NULL;
+    GError *error = NULL;
+    int exit_status = 0;
+
+    gboolean result = g_spawn_command_line_sync(cmd, &standard_output, &standard_error, &exit_status, &error);
+    g_free(cmd);
+    if (!result) { show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Failed to launch release check: %s", error ? error->message : "Unknown"); if (error) g_error_free(error); return; }
+    if (exit_status != 0 || !standard_output || strlen(standard_output) == 0) { show_message(GTK_WINDOW(window), GTK_MESSAGE_ERROR, "Update check failed (Exit: %d).", exit_status); g_free(standard_output); g_free(standard_error); return; }
+
+    char *tag_name = extract_sub_json_str(standard_output, "tag_name");
+    g_free(standard_output); g_free(standard_error);
+
+    if (!tag_name) { show_message(GTK_WINDOW(window), GTK_MESSAGE_WARNING, "Could not parse version info."); return; }
+    char *current_tag = g_strdup_printf("v%s", PROXYBRIDGE_VERSION);
+
+    if (strcmp(tag_name, current_tag) == 0) { show_message(GTK_WINDOW(window), GTK_MESSAGE_INFO, "You are using the latest version (%s).", PROXYBRIDGE_VERSION); }
+    else {
+        GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE, "New version %s is available!\nCurrent: %s\n\nUpdate now?", tag_name, PROXYBRIDGE_VERSION);
+        gtk_dialog_add_button(GTK_DIALOG(dialog), "Download Now", GTK_RESPONSE_ACCEPT);
+        gtk_dialog_add_button(GTK_DIALOG(dialog), "Close", GTK_RESPONSE_CANCEL);
+        int resp = gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        if (resp == GTK_RESPONSE_ACCEPT) on_create_update_script_and_run();
+    }
+    g_free(current_tag); g_free(tag_name);
+}
+
+static void on_about(GtkWidget *widget, gpointer data) {
+    GtkWidget *dialog = gtk_dialog_new_with_buttons("About ProxyBridge", GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT | GTK_DIALOG_MODAL, "OK", GTK_RESPONSE_OK, NULL);
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 400, 300);
+    GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    gtk_container_set_border_width(GTK_CONTAINER(content_area), 20);
+    char *markup = g_strdup_printf(
+        "<span size='xx-large' weight='bold'>ProxyBridge</span>\n"
+        "<span color='gray'>Version %s</span>\n\n"
+        "Universal proxy client for Linux applications\n\n"
+        "Author: Sourav Kalal / InterceptSuite\n\n"
+        "Website: <a href=\"https://interceptsuite.com\">interceptsuite.com</a>\n"
+        "GitHub: <a href=\"https://github.com/InterceptSuite/ProxyBridge\">InterceptSuite/ProxyBridge</a>\n\n"
+        "License: MIT", PROXYBRIDGE_VERSION);
+    GtkWidget *label = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(label), markup);
+    gtk_label_set_justify(GTK_LABEL(label), GTK_JUSTIFY_CENTER);
+    g_free(markup);
+    gtk_box_pack_start(GTK_BOX(content_area), label, TRUE, TRUE, 0);
+    gtk_widget_show_all(dialog);
+    gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+}
+
+static void signal_handler(int sig) {
+    fprintf(stderr, "\nSignal %d received. Stopping ProxyBridge...\n", sig);
+    ProxyBridge_Stop();
+    exit(sig);
+}
+
+static void on_window_destroy(GtkWidget *widget, gpointer data) {
+    ProxyBridge_Stop();
+    gtk_main_quit();
+}
+
+int main(int argc, char *argv[]) {
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    signal(SIGSEGV, signal_handler);
+
+    if (getuid() != 0) { gtk_init(&argc, &argv); show_message(NULL, GTK_MESSAGE_ERROR, "ProxyBridge must be run as root (sudo)."); return 1; }
+    setenv("GSETTINGS_BACKEND", "memory", 1);
+
+    // load config from file
+    load_config();
+
+    gtk_init(&argc, &argv);
+
+    GtkSettings *settings = gtk_settings_get_default();
+    if (settings) g_object_set(settings, "gtk-application-prefer-dark-theme", TRUE, NULL);
+
+    window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(window), "ProxyBridge");
+    gtk_window_set_default_size(GTK_WINDOW(window), 900, 600);
+    g_signal_connect(window, "destroy", G_CALLBACK(on_window_destroy), NULL);
+
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_container_add(GTK_CONTAINER(window), vbox);
+
+    // setup menu
+    GtkWidget *menubar = gtk_menu_bar_new();
+    GtkWidget *proxy_menu_item = gtk_menu_item_new_with_label("Proxy");
+    GtkWidget *proxy_menu = gtk_menu_new();
+    GtkWidget *config_item = gtk_menu_item_new_with_label("Proxy Settings");
+    GtkWidget *rules_item = gtk_menu_item_new_with_label("Proxy Rules");
+
+    GtkWidget *log_check_item = gtk_check_menu_item_new_with_label("Enable Traffic Logging");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(log_check_item), g_chk_logging);
+    g_signal_connect(log_check_item, "toggled", G_CALLBACK(on_log_traffic_toggled), NULL);
+
+    GtkWidget *dns_check_item = gtk_check_menu_item_new_with_label("DNS via Proxy");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(dns_check_item), g_chk_dns);
+    g_signal_connect(dns_check_item, "toggled", G_CALLBACK(on_dns_proxy_toggled), NULL);
+
+    GtkWidget *exit_item = gtk_menu_item_new_with_label("Exit");
+
+    g_signal_connect(config_item, "activate", G_CALLBACK(on_proxy_configure), NULL);
+    g_signal_connect(rules_item, "activate", G_CALLBACK(on_proxy_rules_clicked), NULL);
+    g_signal_connect(exit_item, "activate", G_CALLBACK(on_window_destroy), NULL);
+
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), config_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), rules_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), gtk_separator_menu_item_new());
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), log_check_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), dns_check_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), gtk_separator_menu_item_new());
+    gtk_menu_shell_append(GTK_MENU_SHELL(proxy_menu), exit_item);
+    gtk_menu_item_set_submenu(GTK_MENU_ITEM(proxy_menu_item), proxy_menu);
+
+    GtkWidget *about_menu_item = gtk_menu_item_new_with_label("About");
+    GtkWidget *about_menu = gtk_menu_new();
+    GtkWidget *about_child_item = gtk_menu_item_new_with_label("About");
+    g_signal_connect(about_child_item, "activate", G_CALLBACK(on_about), NULL);
+    GtkWidget *update_item = gtk_menu_item_new_with_label("Check for Updates");
+    g_signal_connect(update_item, "activate", G_CALLBACK(on_check_update), NULL);
+    gtk_menu_shell_append(GTK_MENU_SHELL(about_menu), about_child_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(about_menu), update_item);
+    gtk_menu_item_set_submenu(GTK_MENU_ITEM(about_menu_item), about_menu);
+
+    gtk_menu_shell_append(GTK_MENU_SHELL(menubar), proxy_menu_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menubar), about_menu_item);
+    gtk_box_pack_start(GTK_BOX(vbox), menubar, FALSE, FALSE, 0);
+
+    // tabs
+    GtkWidget *notebook = gtk_notebook_new();
+    gtk_box_pack_start(GTK_BOX(vbox), notebook, TRUE, TRUE, 0);
+
+    // connections tab
+    GtkWidget *conn_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_set_border_width(GTK_CONTAINER(conn_vbox), 5);
+    GtkWidget *conn_toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    GtkWidget *conn_search = gtk_search_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(conn_search), "Search connections...");
+    g_signal_connect(conn_search, "search-changed", G_CALLBACK(on_search_conn_changed), NULL);
+    GtkWidget *conn_clear_btn = gtk_button_new_with_label("Clear Logs");
+    g_signal_connect(conn_clear_btn, "clicked", G_CALLBACK(on_clear_conn_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(conn_toolbar), conn_search, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(conn_toolbar), conn_clear_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(conn_vbox), conn_toolbar, FALSE, FALSE, 0);
+    conn_view = GTK_TEXT_VIEW(gtk_text_view_new());
+    gtk_text_view_set_editable(conn_view, FALSE);
+    gtk_text_view_set_cursor_visible(conn_view, FALSE);
+    conn_buffer = gtk_text_view_get_buffer(conn_view);
+    gtk_text_buffer_create_tag(conn_buffer, "hidden", "invisible", TRUE, NULL);
+    GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);
+    gtk_container_add(GTK_CONTAINER(scrolled_window), GTK_WIDGET(conn_view));
+    gtk_box_pack_start(GTK_BOX(conn_vbox), scrolled_window, TRUE, TRUE, 0);
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), conn_vbox, gtk_label_new("Connections"));
+
+    // logs tab
+    GtkWidget *log_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_set_border_width(GTK_CONTAINER(log_vbox), 5);
+    GtkWidget *log_toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    GtkWidget *log_search = gtk_search_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(log_search), "Search logs...");
+    g_signal_connect(log_search, "search-changed", G_CALLBACK(on_search_log_changed), NULL);
+    GtkWidget *log_clear_btn = gtk_button_new_with_label("Clear Logs");
+    g_signal_connect(log_clear_btn, "clicked", G_CALLBACK(on_clear_log_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(log_toolbar), log_search, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(log_toolbar), log_clear_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(log_vbox), log_toolbar, FALSE, FALSE, 0);
+    log_view = GTK_TEXT_VIEW(gtk_text_view_new());
+    gtk_text_view_set_editable(log_view, FALSE);
+    gtk_text_view_set_cursor_visible(log_view, FALSE);
+    log_buffer = gtk_text_view_get_buffer(log_view);
+    gtk_text_buffer_create_tag(log_buffer, "hidden", "invisible", TRUE, NULL);
+    GtkWidget *log_scroll = gtk_scrolled_window_new(NULL, NULL);
+    gtk_container_add(GTK_CONTAINER(log_scroll), GTK_WIDGET(log_view));
+    gtk_box_pack_start(GTK_BOX(log_vbox), log_scroll, TRUE, TRUE, 0);
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), log_vbox, gtk_label_new("Activity Logs"));
+
+    // status bar
+    status_bar = gtk_statusbar_new();
+    status_context_id = gtk_statusbar_get_context_id(GTK_STATUSBAR(status_bar), "Status");
+    gtk_box_pack_start(GTK_BOX(vbox), status_bar, FALSE, FALSE, 0);
+
+    // start
+    ProxyBridge_SetLogCallback(lib_log_callback);
+    ProxyBridge_SetConnectionCallback(lib_connection_callback);
+    ProxyBridge_SetTrafficLoggingEnabled(g_chk_logging);
+    ProxyBridge_SetDnsViaProxy(g_chk_dns);
+
+    if (ProxyBridge_Start()) {
+        // apply config
+        ProxyBridge_SetProxyConfig(g_proxy_type, g_proxy_ip, g_proxy_port, g_proxy_user, g_proxy_pass);
+
+        // restore rules
+        for (GList *l = g_rules_list; l != NULL; l = l->next) {
+            RuleData *r = (RuleData *)l->data;
+            r->id = ProxyBridge_AddRule(r->process_name, r->target_hosts, r->target_ports, r->protocol, r->action);
+            if (!r->enabled) ProxyBridge_DisableRule(r->id);
+        }
+
+        gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "ProxyBridge Service Started.");
+    } else {
+        gtk_statusbar_push(GTK_STATUSBAR(status_bar), status_context_id, "Failed to start ProxyBridge engine.");
+    }
+
+    gtk_widget_show_all(window);
+    gtk_main();
+
+    return 0;
+}

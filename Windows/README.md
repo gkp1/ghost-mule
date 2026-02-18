@@ -209,7 +209,7 @@ ProxyBridge_CLI.exe -h
  | |_) | '__/ _ \ \/ / | | | |  _ \| '__| |/ _` |/ _` |/ _ \
  |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/
  |_|   |_|  \___/_/\_\\__, | |____/|_|  |_|\__,_|\__, |\___|
-                      |___/                      |___/  V3.1.0
+                      |___/                      |___/  V3.2.0
 
   Universal proxy client for Windows applications
 
@@ -223,21 +223,22 @@ Usage:
   ProxyBridge_CLI [command] [options]
 
 Options:
-  --proxy <proxy>      Proxy server URL with optional authentication
-                       Format: type://ip:port or type://ip:port:username:password
-                       Examples: socks5://127.0.0.1:1080
-                                 http://proxy.com:8080:myuser:mypass [default: socks5://127.0.0.1:4444]
-  --rule <rule>        Traffic routing rule (multiple values supported, can repeat)
-                       Format: process:hosts:ports:protocol:action
-                         process  - Process name(s): chrome.exe, chr*.exe, *.exe, or *
-                         hosts    - IP/host(s): *, google.com, 192.168.*.*, or multiple comma-separated
-                         ports    - Port(s): *, 443, 80,443, 80-100, or multiple comma-separated
-                         protocol - TCP, UDP, or BOTH
-                         action   - PROXY, DIRECT, or BLOCK
-                       Examples:
-                         chrome.exe:*:*:TCP:PROXY
-                         *:*:53:UDP:PROXY
-                         firefox.exe:*:80,443:TCP:DIRECT
+  --proxy <proxy>          Proxy server URL with optional authentication
+                           Format: type://ip:port or type://ip:port:username:password
+                           Examples: socks5://127.0.0.1:1080
+                                     http://proxy.com:8080:myuser:mypass [default: socks5://127.0.0.1:4444]
+  --rule <rule>            Traffic routing rule (multiple values supported, can repeat)
+                           Format: process:hosts:ports:protocol:action
+                             process  - Process name(s): chrome.exe, chr*.exe, *.exe, or * (use ; for multiple: chrome.exe;firefox.exe)
+                             hosts    - IP/host(s): *, google.com, 192.168.*.*, or multiple separated by ; or ,
+                             ports    - Port(s): *, 443, 80;8080, 80-100, or multiple separated by ; or ,
+                             protocol - TCP, UDP, or BOTH
+                             action   - PROXY, DIRECT, or BLOCK
+                           Examples:
+                             chrome.exe:*:*:TCP:PROXY
+                             chrome.exe;firefox.exe:*:*:TCP:PROXY
+                             *:*:53:UDP:PROXY
+                             firefox.exe:*:80;443:TCP:DIRECT
   --rule-file <rule-file>  Path to JSON file containing proxy rules
                            JSON format (same as GUI export):
                            [{
@@ -249,14 +250,16 @@ Options:
                              "enabled": true
                            }]
                            Example: --rule-file C:\\rules.json []
-  --dns-via-proxy      Route DNS queries through proxy (default: true) [default: True]
-  --verbose <verbose>  Logging verbosity level
-                         0 - No logs (default)
-                         1 - Show log messages only
-                         2 - Show connection events only
-                         3 - Show both logs and connections [default: 0]
-  --version            Show version information
-  -?, -h, --help       Show help and usage information
+  --dns-via-proxy          Route DNS queries through proxy (default: true) [default: True]
+  --localhost-via-proxy    Route localhost traffic through proxy (default: false, most proxies block localhost for SSRF prevention, local traffic to remote proxy will cause issues)
+                           [default: False]
+  --verbose <verbose>      Logging verbosity level
+                             0 - No logs (default)
+                             1 - Show log messages only
+                             2 - Show connection events only
+                             3 - Show both logs and connections [default: 0]
+  --version                Show version information
+  -?, -h, --help           Show help and usage information
 
 Commands:
   --update  Check for updates and download latest version from GitHub
@@ -314,14 +317,42 @@ Commands:
 
 - **DNS Traffic Handling**: DNS traffic on TCP and UDP port 53 is handled separately from proxy rules. Even if you configure rules for port 53, they will be ignored. Instead, DNS routing is controlled by the **DNS via Proxy** option in the Proxy menu (enabled by default). When enabled, all DNS queries are routed through the proxy; when disabled, DNS queries use direct connection.
 
+- **Localhost Traffic Handling**: Localhost traffic (127.0.0.0/8) requires special handling and is controlled by the **Localhost via Proxy** option in the Proxy menu (disabled by default):
+
+  **Default Behavior (Localhost via Proxy = Disabled):**
+  - ALL localhost traffic automatically uses direct connection
+  - Proxy rules matching 127.x.x.x addresses are automatically overridden to DIRECT
+  - This is the recommended setting for most users
+
+  **Why localhost should stay local:**
+  - **Security**: Most proxy servers reject localhost traffic to prevent SSRF (Server-Side Request Forgery) attacks
+  - **Compatibility**: Many applications run local services that must stay on your machine:
+    - NVIDIA GeForce Experience (local API servers)
+    - Chrome/Edge DevTools (127.0.0.1:9222 debugging protocol)
+    - Development servers (localhost web/database servers)
+    - Inter-process communication (IPC) using TCP/UDP on 127.0.0.1
+  - **Routing Issues**: When localhost traffic goes to a remote proxy:
+    - The proxy server cannot reach services running on YOUR machine
+    - Applications expecting local responses will timeout or fail
+    - Example: `curl http://127.0.0.1:8080` via remote proxy asks the proxy's localhost, not yours
+
+  **When to Enable Localhost via Proxy:**
+  - ✅ Proxy server is running on the same machine (127.0.0.1:1080)
+  - ✅ Security testing: Intercepting localhost traffic in Burp Suite/InterceptSuite
+  - ✅ Your proxy is configured to handle localhost requests properly
+  - ❌ Do NOT enable if proxy is on a different machine/IP address
+
+  **CLI/GUI Options:**
+  - GUI: **Proxy** menu → **Localhost via Proxy** (checkbox)
+  - CLI: `--localhost-via-proxy` flag
+
 - **Automatic Direct Routing**: Certain IP addresses and ports automatically use direct connection regardless of proxy rules, though you can still create rules with **DIRECT** (default) or **BLOCK** actions for them:
-  - **Localhost addresses** (127.0.0.0/8) - Loopback traffic
   - **Broadcast addresses** (255.255.255.255 and x.x.x.255) - Network broadcast
   - **Multicast addresses** (224.0.0.0 - 239.255.255.255) - Group communication
   - **APIPA addresses** (169.254.0.0/16) - Automatic Private IP Addressing (link-local)
   - **DHCP ports** (UDP 67, 68) - Dynamic Host Configuration Protocol
 
-  These addresses and ports are used by system components, network discovery, and essential Windows services. While proxy rules are automatically overridden to DIRECT for these targets, you can still define rules with DIRECT or BLOCK actions to explicitly control or block this traffic. Note that Windows loopback traffic (127.x.x.x) uses a method that bypasses the network interface card (NIC), which currently doesn't support proxy routing due to technical limitations with WinDivert at the network layer.
+  These addresses and ports are used by system components, network discovery, and essential Windows services. While proxy rules are automatically overridden to DIRECT for these targets, you can still define rules with DIRECT or BLOCK actions to explicitly control or block this traffic.
 
 - **UDP Proxy Requirements**: UDP traffic only works when a SOCKS5 proxy is configured. If an HTTP proxy server is configured, ProxyBridge will ignore UDP proxy rules and route UDP traffic as direct connection instead. This limitation does not affect UDP rules with BLOCK or DIRECT actions.
 

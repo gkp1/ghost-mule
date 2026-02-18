@@ -95,3 +95,7 @@ Linux/output/**
 Linux/build/**
 MacOS/ProxyBridge/config/Signing-Config-ext.xcconfig
 MacOS/ProxyBridge/config/Signing-Config-app.xcconfig
+Linux/cli/main.o
+Linux/cli/proxybridge-cli
+Linux/src/libproxybridge.so
+Linux/src/ProxyBridge.o

@@ -16,7 +16,7 @@
 #define LOCAL_PROXY_PORT 34010
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
 #define MAX_PROCESS_NAME 256
-#define VERSION "3.1.0"
+#define VERSION "3.2.0"
 #define PID_CACHE_SIZE 1024
 #define PID_CACHE_TTL_MS 1000
 #define NUM_PACKET_THREADS 4
@@ -113,6 +113,7 @@ static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
 static char g_proxy_username[256] = "";
 static char g_proxy_password[256] = "";
 static BOOL g_dns_via_proxy = TRUE;
+static BOOL g_localhost_via_proxy = FALSE;  // default disabled for security - most proxy server block localhost for ssrf and also many app might not work if localhost trafic goes to remote server if proxy server is on diffrent machine
 static LogCallback g_log_callback = NULL;
 static ConnectionCallback g_connection_callback = NULL;
 
@@ -265,11 +266,19 @@ static DWORD WINAPI packet_processor(LPVOID arg)
             continue;
         }
 
-        WinDivertHelperParsePacket(packet, packet_len, &ip_header, NULL, NULL,
+        PWINDIVERT_IPV6HDR ipv6_header = NULL;
+        WinDivertHelperParsePacket(packet, packet_len, &ip_header, &ipv6_header, NULL,
             NULL, NULL, &tcp_header, &udp_header, NULL, NULL, NULL, NULL);
 
         if (ip_header == NULL)
+        {
+            // IPv6 traffic pass directly without proxying
+            if (ipv6_header != NULL)
+            {
+                WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+            }
             continue;
+        }
 
         if (udp_header != NULL && tcp_header == NULL)
         {
@@ -319,6 +328,11 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                         action = RULE_ACTION_DIRECT;
                     else
                         action = check_process_rule(src_ip, src_port, dest_ip, dest_port, TRUE, &pid);
+
+                    // override PROXY to DIRECT if localhost proxy is disabled and destination is localhost
+                    BYTE dest_first_octet = (dest_ip >> 0) & 0xFF;
+                    if (action == RULE_ACTION_PROXY && !g_localhost_via_proxy && dest_first_octet == 127)
+                        action = RULE_ACTION_DIRECT;
 
                     // Override PROXY to DIRECT for critical IPs and ports
                     if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(dest_ip))
@@ -377,15 +391,21 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     {
                         add_connection(src_port, src_ip, dest_ip, dest_port);
 
-                        // dest to rely udp
+                        // redirect to UDP relay server at 127.0.0.1:34011
                         udp_header->DstPort = htons(LOCAL_UDP_RELAY_PORT);
-
-                        // Set destination to localhost (127.0.0.1)
                         ip_header->DstAddr = htonl(INADDR_LOOPBACK);
 
-                        // Keep source IP unchanged
-                        addr.Outbound = FALSE;
+                        // check if source is localhos
+                        BYTE src_first_octet = (ntohl(ip_header->SrcAddr) >> 24) & 0xFF;
+                        BOOL src_is_loopback = (src_first_octet == 127);
 
+                        if (!src_is_loopback)
+                        {
+                            // for non loopback source: mark as inbound
+                            addr.Outbound = FALSE;
+                        }
+                        // for loopback we need keep as outbound (127.x.x.x -> 127.0.0.1)
+                        // for a fucking stupid reason i missed this part for 6 months
                     }
                 }
             }
@@ -419,10 +439,18 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 if (get_connection(dst_port, &orig_dest_ip, &orig_dest_port))
                     tcp_header->SrcPort = htons(orig_dest_port);
 
-                UINT32 temp_addr = ip_header->DstAddr;
-                ip_header->DstAddr = ip_header->SrcAddr;
-                ip_header->SrcAddr = temp_addr;
-                addr.Outbound = FALSE;
+                BYTE src_first = (ntohl(ip_header->SrcAddr) >> 24) & 0xFF;
+                BYTE dst_first = (ntohl(ip_header->DstAddr) >> 24) & 0xFF;
+                BOOL is_loopback = (src_first == 127 && dst_first == 127);
+
+                if (!is_loopback)
+                {
+                    UINT32 temp_addr = ip_header->DstAddr;
+                    ip_header->DstAddr = ip_header->SrcAddr;
+                    ip_header->SrcAddr = temp_addr;
+                    addr.Outbound = FALSE;
+                }
+
 
                 if (tcp_header->Fin || tcp_header->Rst)
                     remove_connection(dst_port);
@@ -434,11 +462,20 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 if (tcp_header->Fin || tcp_header->Rst)
                     remove_connection(src_port);
 
-                UINT32 temp_addr = ip_header->DstAddr;
                 tcp_header->DstPort = htons(g_local_relay_port);
-                ip_header->DstAddr = ip_header->SrcAddr;
-                ip_header->SrcAddr = temp_addr;
-                addr.Outbound = FALSE;
+
+                BYTE src_first = (ntohl(ip_header->SrcAddr) >> 24) & 0xFF;
+                BYTE dst_first = (ntohl(ip_header->DstAddr) >> 24) & 0xFF;
+                BOOL is_loopback = (src_first == 127 && dst_first == 127);
+
+                if (!is_loopback)
+                {
+                    UINT32 temp_addr = ip_header->DstAddr;
+                    ip_header->DstAddr = ip_header->SrcAddr;
+                    ip_header->SrcAddr = temp_addr;
+                    addr.Outbound = FALSE;
+                }
+
             }
             else
             {
@@ -461,6 +498,10 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     action = RULE_ACTION_DIRECT;
                 else
                     action = check_process_rule(src_ip, src_port, orig_dest_ip, orig_dest_port, FALSE, &pid);
+
+                BYTE orig_dest_first_octet = (orig_dest_ip >> 0) & 0xFF;
+                if (action == RULE_ACTION_PROXY && !g_localhost_via_proxy && orig_dest_first_octet == 127)
+                    action = RULE_ACTION_DIRECT;
 
                 // Override PROXY to DIRECT for criticl ips
                 if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(orig_dest_ip))
@@ -521,11 +562,29 @@ static DWORD WINAPI packet_processor(LPVOID arg)
             {
                 add_connection(src_port, src_ip, orig_dest_ip, orig_dest_port);
 
-                UINT32 temp_addr = ip_header->DstAddr;
                 tcp_header->DstPort = htons(g_local_relay_port);
-                ip_header->DstAddr = ip_header->SrcAddr;
-                ip_header->SrcAddr = temp_addr;
-                addr.Outbound = FALSE;
+
+                // check if this is localhost -> localhost traffic
+                BYTE src_first_octet = (ntohl(ip_header->SrcAddr) >> 24) & 0xFF;
+                BYTE dst_first_octet = (ntohl(ip_header->DstAddr) >> 24) & 0xFF;
+                BOOL is_loopback_to_loopback = (src_first_octet == 127 && dst_first_octet == 127);
+
+                if (is_loopback_to_loopback)
+                {
+                    // for localhost -> localhost just change port, keep as outbound
+                    // dont swap IPs Windows loopback routing needs both to stay 127.x.x.x
+                    log_message("[PACKET] Loopback redirect: 127.x.x.x:%d -> 127.x.x.x:%d (relay port %d)",
+                        ntohs(tcp_header->SrcPort), orig_dest_port, g_local_relay_port);
+                    // addr.Outbound stays TRUE
+                }
+                else
+                {
+                    // for normal traffic: swap IPs and mark as inbound (standard relay behavior)
+                    UINT32 temp_addr = ip_header->DstAddr;
+                    ip_header->DstAddr = ip_header->SrcAddr;
+                    ip_header->SrcAddr = temp_addr;
+                    addr.Outbound = FALSE;
+                }
                 }
             }
         }
@@ -767,6 +826,40 @@ static BOOL match_ip_pattern(const char *pattern, UINT32 ip)
     if (pattern == NULL || strcmp(pattern, "*") == 0)
         return TRUE;
 
+    // check for IP range
+    char *dash = strchr(pattern, '-');
+    if (dash != NULL)
+    {
+        char start_ip_str[64], end_ip_str[64];
+        size_t start_len = dash - pattern;
+        if (start_len >= sizeof(start_ip_str))
+            return FALSE;
+
+        strncpy_s(start_ip_str, sizeof(start_ip_str), pattern, start_len);
+        start_ip_str[start_len] = '\0';
+        strncpy_s(end_ip_str, sizeof(end_ip_str), dash + 1, _TRUNCATE);
+
+        // parse start and end IPs
+        UINT32 start_ip = 0, end_ip = 0;
+        int s1, s2, s3, s4, e1, e2, e3, e4;
+
+        if (sscanf_s(start_ip_str, "%d.%d.%d.%d", &s1, &s2, &s3, &s4) == 4 &&
+            sscanf_s(end_ip_str, "%d.%d.%d.%d", &e1, &e2, &e3, &e4) == 4)
+        {
+            start_ip = (s1 << 0) | (s2 << 8) | (s3 << 16) | (s4 << 24);
+            end_ip = (e1 << 0) | (e2 << 8) | (e3 << 16) | (e4 << 24);
+
+            // checking as network byte order would be wrong, compare as little-endian UINT32
+            // change to big-endian for proper comparison
+            UINT32 ip_be = ((ip & 0xFF) << 24) | ((ip & 0xFF00) << 8) | ((ip & 0xFF0000) >> 8) | ((ip & 0xFF000000) >> 24);
+            UINT32 start_be = ((start_ip & 0xFF) << 24) | ((start_ip & 0xFF00) << 8) | ((start_ip & 0xFF0000) >> 8) | ((start_ip & 0xFF000000) >> 24);
+            UINT32 end_be = ((end_ip & 0xFF) << 24) | ((end_ip & 0xFF00) << 8) | ((end_ip & 0xFF0000) >> 8) | ((end_ip & 0xFF000000) >> 24);
+
+            return (ip_be >= start_be && ip_be <= end_be);
+        }
+        return FALSE;
+    }
+
     // Extract 4 octets from IP (little-endian)
     unsigned char ip_octets[4];
     ip_octets[0] = (ip >> 0) & 0xFF;
@@ -977,13 +1070,13 @@ static BOOL match_process_list(const char *process_list, const char *process_nam
 
 static BOOL is_broadcast_or_multicast(UINT32 ip)
 {
-    // Localhost: 127.0.0.0/8 (127.x.x.x)
+    // note: Localhost (127.x.x.x) is now supported for proxying
+    // This allows intercepting localhost connections for MITM scenarios
+
     BYTE first_octet = (ip >> 0) & 0xFF;
-    if (first_octet == 127)
-        return TRUE;
+    BYTE second_octet = (ip >> 8) & 0xFF;
 
     // APIPA (Link-Local): 169.254.0.0/16 (169.254.x.x)
-    BYTE second_octet = (ip >> 8) & 0xFF;
     if (first_octet == 169 && second_octet == 254)
         return TRUE;
 
@@ -1880,7 +1973,7 @@ static DWORD WINAPI connection_handler(LPVOID arg)
 
     if (connect(socks_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) == SOCKET_ERROR)
     {
-        log_message("Failed to connect to proxy (%d)", WSAGetLastError());
+        log_message("[RELAY] Failed to connect to proxy (%d)", WSAGetLastError());
         closesocket(client_sock);
         closesocket(socks_sock);
         return 0;
@@ -2385,6 +2478,92 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditRule(UINT32 rule_id, const char* process_na
     return FALSE;
 }
 
+PROXYBRIDGE_API UINT32 ProxyBridge_GetRulePosition(UINT32 rule_id)
+{
+    if (rule_id == 0)
+        return 0;
+
+    UINT32 position = 1;
+    PROCESS_RULE *rule = rules_list;
+    while (rule != NULL)
+    {
+        if (rule->rule_id == rule_id)
+            return position;
+        position++;
+        rule = rule->next;
+    }
+    return 0;
+}
+
+PROXYBRIDGE_API BOOL ProxyBridge_MoveRuleToPosition(UINT32 rule_id, UINT32 new_position)
+{
+    if (rule_id == 0 || new_position == 0)
+        return FALSE;
+
+    // first rule and remove it from current position
+    PROCESS_RULE *rule = rules_list;
+    PROCESS_RULE *prev = NULL;
+
+    while (rule != NULL)
+    {
+        if (rule->rule_id == rule_id)
+            break;
+        prev = rule;
+        rule = rule->next;
+    }
+
+    if (rule == NULL)
+        return FALSE;
+
+    // Remove from current position
+    if (prev == NULL)
+    {
+        rules_list = rule->next;
+    }
+    else
+    {
+        prev->next = rule->next;
+    }
+
+    // Insert at new position
+    if (new_position == 1)
+    {
+        // Insert at head
+        rule->next = rules_list;
+        rules_list = rule;
+    }
+    else
+    {
+        // taken from stackflow
+        PROCESS_RULE *current = rules_list;
+        UINT32 pos = 1;
+
+        while (current != NULL && pos < new_position - 1)
+        {
+            current = current->next;
+            pos++;
+        }
+
+        if (current == NULL)
+        {
+            // position is beyond list end we can append to tail
+            current = rules_list;
+            while (current->next != NULL)
+                current = current->next;
+            current->next = rule;
+            rule->next = NULL;
+        }
+        else
+        {
+            rule->next = current->next;
+            current->next = rule;
+        }
+    }
+
+    log_message("Moved rule ID %u to position %u", rule_id, new_position);
+    return TRUE;
+}
+
 PROXYBRIDGE_API BOOL ProxyBridge_SetProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password)
 {
     if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
@@ -2424,6 +2603,12 @@ PROXYBRIDGE_API void ProxyBridge_SetDnsViaProxy(BOOL enable)
 {
     g_dns_via_proxy = enable;
     log_message("DNS routing: %s", enable ? "via proxy" : "direct");
+}
+
+PROXYBRIDGE_API void ProxyBridge_SetLocalhostViaProxy(BOOL enable)
+{
+    g_localhost_via_proxy = enable;
+    log_message("Localhost routing: %s (most proxies block localhost for SSRF prevention)", enable ? "via proxy" : "direct");
 }
 
 PROXYBRIDGE_API void ProxyBridge_SetLogCallback(LogCallback callback)
@@ -2724,9 +2909,11 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     Sleep(500);
 
     snprintf(filter, sizeof(filter),
-        "(tcp and (outbound or (tcp.DstPort == %d or tcp.SrcPort == %d))) or (udp and (outbound or (udp.DstPort == %d or udp.SrcPort == %d)))",
+        "(tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or (udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)))",
         g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT);
 
+    // Note: Added 'loopback' to filter to capture localhost (127.x.x.x) traffic
+    // This enables proxying local connections for MITM scenarios
     windivert_handle = WinDivertOpen(filter, WINDIVERT_LAYER_NETWORK, priority, 0);
     if (windivert_handle == INVALID_HANDLE_VALUE)
     {
