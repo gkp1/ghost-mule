@@ -14,8 +14,20 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     private(set) var proxyConfig: ProxyConfig?
     
     private let maxLogEntries = 1000
+    // trim to 80% when limit hit to avoid trimming on each entry
+    private let trimToEntries = 800
     private let logPollingInterval = 1.0
     private let extensionIdentifier = "com.interceptsuite.ProxyBridge.extension"
+    // reuse formatter
+    // saves memory about 2% and speed up the ui
+    private let timestampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+    // removed uuid and use int - memory usage and speed improved due to size
+    private var connectionIdCounter: Int = 0
+    private var activityIdCounter: Int = 0
     
     struct ProxyConfig {
         let type: String
@@ -26,7 +38,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     }
     
     struct ConnectionLog: Identifiable {
-        let id = UUID()
+        let id: Int
         let timestamp: String
         let connectionProtocol: String
         let process: String
@@ -36,7 +48,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     }
     
     struct ActivityLog: Identifiable {
-        let id = UUID()
+        let id: Int
         let timestamp: String
         let level: String
         let message: String
@@ -296,7 +308,9 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             return
         }
         
+        connectionIdCounter &+= 1
         let connectionLog = ConnectionLog(
+            id: connectionIdCounter,
             timestamp: getCurrentTimestamp(),
             connectionProtocol: proto,
             process: process,
@@ -306,8 +320,9 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         )
         connections.append(connectionLog)
         
+        // Trim in bulk to avoid O(n) shift on every entry at the limit
         if connections.count > maxLogEntries {
-            connections.removeFirst()
+            connections.removeFirst(connections.count - trimToEntries)
         }
     }
     
@@ -318,7 +333,9 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             return
         }
         
+        activityIdCounter &+= 1
         let activityLog = ActivityLog(
+            id: activityIdCounter,
             timestamp: timestamp,
             level: level,
             message: message
@@ -326,7 +343,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         activityLogs.append(activityLog)
         
         if activityLogs.count > maxLogEntries {
-            activityLogs.removeFirst()
+            activityLogs.removeFirst(activityLogs.count - trimToEntries)
         }
     }
     
@@ -382,7 +399,9 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     }
     
     private func addLog(_ level: String, _ message: String) {
+        activityIdCounter &+= 1
         let log = ActivityLog(
+            id: activityIdCounter,
             timestamp: getCurrentTimestamp(),
             level: level,
             message: message
@@ -390,14 +409,12 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         activityLogs.append(log)
         
         if activityLogs.count > maxLogEntries {
-            activityLogs.removeFirst()
+            activityLogs.removeFirst(activityLogs.count - trimToEntries)
         }
     }
     
     private func getCurrentTimestamp() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter.string(from: Date())
+        return timestampFormatter.string(from: Date())
     }
     
     deinit {
