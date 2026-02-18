@@ -226,7 +226,7 @@ struct ProxyRule: Codable {
 
 class AppProxyProvider: NETransparentProxyProvider {
     
-    // circular buffer for log queue to avoids O(n) removeFirst() on array
+    // Circular buffer for log queue - avoids O(n) removeFirst() on array
     private static let logCapacity = 1000
     private var logBuffer: [[String: String]] = Array(repeating: [:], count: AppProxyProvider.logCapacity)
     private var logHead = 0  // next read position
@@ -234,6 +234,11 @@ class AppProxyProvider: NETransparentProxyProvider {
     private var logCount = 0
     private let logQueueLock = NSLock()
     private let dateFormatter: ISO8601DateFormatter = ISO8601DateFormatter()
+    
+    // cache results so each process only instead of per-connection.
+    private var pidCache: [pid_t: String] = [:]
+    private let pidCacheLock = NSLock()
+    private static let pidCacheMaxSize = 256
     
     private func getProcessName(from metaData: NEFlowMetaData) -> String? {
         guard let auditTokenData = metaData.sourceAppAuditToken else {
@@ -249,10 +254,17 @@ class AppProxyProvider: NETransparentProxyProvider {
             return pid_t(token[5])
         }
         
-        guard pid > 0 else {
-            return nil
-        }
+        guard pid > 0 else { return nil }
         
+        // Check cache first
+        pidCacheLock.lock()
+        if let cached = pidCache[pid] {
+            pidCacheLock.unlock()
+            return cached
+        }
+        pidCacheLock.unlock()
+        
+        // Cache miss - call proc_pidpath()
         var pathBuffer = [Int8](repeating: 0, count: Int(MAXPATHLEN))
         guard proc_pidpath(pid, &pathBuffer, UInt32(MAXPATHLEN)) > 0 else {
             return nil
@@ -260,6 +272,15 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         let fullPath = String(cString: pathBuffer)
         let processName = (fullPath as NSString).lastPathComponent
+        
+        // Store in cache (evict all if too large - processes rarely exceed this)
+        pidCacheLock.lock()
+        if pidCache.count >= AppProxyProvider.pidCacheMaxSize {
+            pidCache.removeAll(keepingCapacity: true)
+        }
+        pidCache[pid] = processName
+        pidCacheLock.unlock()
+        
         return processName
     }
     
@@ -519,6 +540,14 @@ class AppProxyProvider: NETransparentProxyProvider {
     }
     
     private func handleTCPFlow(_ flow: NEAppProxyTCPFlow) -> Bool {
+        let metaData = flow.metaData
+        let processPath = metaData.sourceAppSigningIdentifier
+        
+        // early exit for own app traffic before any other work
+        if processPath == "com.interceptsuite.ProxyBridge" || processPath == "com.interceptsuite.ProxyBridge.extension" {
+            return false
+        }
+        
         let remoteEndpoint = flow.remoteEndpoint
         var destination = ""
         var portNum: UInt16 = 0
@@ -533,18 +562,8 @@ class AppProxyProvider: NETransparentProxyProvider {
             portStr = "unknown"
         }
         
-        var processPath = "unknown"
-        var processName: String?
-        if let metaData = flow.metaData as? NEFlowMetaData {
-            processPath = metaData.sourceAppSigningIdentifier
-            processName = getProcessName(from: metaData)
-        }
-        
+        let processName = getProcessName(from: metaData)
         let displayName = processName ?? processPath
-        
-        if processPath == "com.interceptsuite.ProxyBridge" || processPath == "com.interceptsuite.ProxyBridge.extension" {
-            return false
-        }
         
         proxyLock.lock()
         let hasProxyConfig = (proxyHost != nil && proxyPort != nil)
