@@ -23,3 +23,7 @@ PROVISIONING_PROFILE_SPECIFIER = ProxyBridge Extension Prod
 CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
 ENABLE_HARDENED_RUNTIME = YES
 
+// MARK: - Architecture (Universal Binary: Intel + Apple Silicon)
+ARCHS = arm64 x86_64
+ONLY_ACTIVE_ARCH = NO
+
