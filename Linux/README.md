@@ -144,8 +144,22 @@ sudo ProxyBridge --cleanup
 #### Command Line Options
 
 ```
-ProxyBridge - Universal proxy client for Linux applications
-Version: 4.0-Beta
+sudo ProxyBridge --help
+
+  ____                        ____       _     _            
+ |  _ \ _ __ _____  ___   _  | __ ) _ __(_) __| | __ _  ___ 
+ | |_) | '__/ _ \ \/ / | | | |  _ \| '__| |/ _` |/ _` |/ _ \
+ |  __/| | | (_) >  <| |_| | | |_) | |  | | (_| | (_| |  __/
+ |_|   |_|  \___/_/\_\\__, | |____/|_|  |_|\__,_|\__, |\___|
+                      |___/                      |___/  V3.2.0
+
+  Universal proxy client for Linux applications
+
+        Author: Sourav Kalal/InterceptSuite
+        GitHub: https://github.com/InterceptSuite/ProxyBridge
+
+USAGE:
+  ProxyBridge [OPTIONS]
 
 OPTIONS:
   --proxy <url>          Proxy server URL with optional authentication
@@ -157,7 +171,7 @@ OPTIONS:
   --rule <rule>          Traffic routing rule (can be specified multiple times)
                          Format: process:hosts:ports:protocol:action
                            process  - Process name(s): curl, cur*, *, or multiple separated by ;
-                           hosts    - IP/host(s): *, google.com, 192.168.*.*, IP ranges (10.0.0.1-10.0.0.255)
+                           hosts    - IP/host(s): *, google.com, 192.168.*.*, or multiple separated by ; or ,
                            ports    - Port(s): *, 443, 80;8080, 80-100, or multiple separated by ; or ,
                            protocol - TCP, UDP, or BOTH
                            action   - PROXY, DIRECT, or BLOCK
@@ -166,29 +180,10 @@ OPTIONS:
                            curl;wget:*:*:TCP:PROXY
                            *:*:53:UDP:PROXY
                            firefox:*:80;443:TCP:DIRECT
-                           curl:10.10.1.1-10.10.255.255:*:TCP:PROXY
 
   --dns-via-proxy <bool> Route DNS queries through proxy
                          Values: true, false, 1, 0
                          Default: true
-
-  --localhost-via-proxy  Enable routing localhost (127.0.0.0/8) traffic through proxy
-                         Default: false (disabled)
-
-                         Security & Compatibility Warning:
-                         - Most proxy servers reject localhost traffic to prevent SSRF attacks
-                         - Many applications run local services (databases, APIs, IPC)
-                         - Routing localhost traffic to remote proxies breaks these applications
-                         - Traffic meant for YOUR machine goes to the proxy server instead
-
-                         Only enable if:
-                         - Proxy server is on the same machine (127.0.0.1)
-                         - You need to intercept localhost traffic for security testing
-                         - Your proxy explicitly supports localhost requests
-
-                         When disabled (default):
-                         - Localhost traffic ALWAYS uses direct connection
-                         - Proxy rules matching 127.x.x.x are automatically overridden to DIRECT
 
   --verbose <level>      Logging verbosity level
                            0 - No logs (default)
@@ -217,8 +212,9 @@ EXAMPLES:
        --dns-via-proxy true --verbose 3
 
 NOTE:
-  ProxyBridge requires root privileges to use NFQUEUE and iptables.
+  ProxyBridge requires root privileges to use nfqueue.
   Run with 'sudo' or as root user.
+
 ```
 
 #### Rule Format
