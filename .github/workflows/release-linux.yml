@@ -1,0 +1,129 @@
+name: Release ProxyBridge Linux
+
+on:
+  release:
+    types: [published, created]
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner)
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          gcc \
+          make \
+          libnetfilter-queue-dev \
+          libnfnetlink-dev \
+          libgtk-3-dev \
+          pkg-config
+      shell: bash
+
+    - name: Build project
+      run: |
+        cd Linux
+        chmod +x build.sh
+        ./build.sh
+      shell: bash
+
+    - name: Copy setup script to output
+      run: |
+        echo "Copying setup.sh to output directory..."
+        cp Linux/setup.sh Linux/output/
+        chmod +x Linux/output/setup.sh
+        echo "✓ Setup script copied"
+      shell: bash
+
+    - name: Verify build output
+      run: |
+        echo "=== Build Output ==="
+        ls -lh Linux/output/
+        echo ""
+        if [ -f "Linux/output/libproxybridge.so" ]; then
+          echo "✓ Library built successfully"
+          file Linux/output/libproxybridge.so
+        else
+          echo "✗ Library build failed"
+          exit 1
+        fi
+        echo ""
+        if [ -f "Linux/output/ProxyBridge" ]; then
+          echo "✓ CLI built successfully"
+          file Linux/output/ProxyBridge
+        else
+          echo "✗ CLI build failed"
+          exit 1
+        fi
+        echo ""
+        if [ -f "Linux/output/setup.sh" ]; then
+          echo "✓ Setup script copied"
+        else
+          echo "✗ Setup script missing"
+          exit 1
+        fi
+      shell: bash
+
+    - name: Extract version from tag
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" == "release" ]; then
+          VERSION="${{ github.event.release.tag_name }}"
+        else
+          VERSION="dev-$(date +%Y%m%d-%H%M%S)"
+        fi
+        # Remove 'v' prefix if present
+        VERSION="${VERSION#v}"
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Version: $VERSION"
+      shell: bash
+
+    - name: Create release archive
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        ARCHIVE_NAME="ProxyBridge-Linux-v${VERSION}.tar.gz"
+
+        echo "Creating archive: $ARCHIVE_NAME"
+        cd Linux/output
+        tar -czf "../$ARCHIVE_NAME" ./*
+
+        echo ""
+        echo "Archive created successfully:"
+        ls -lh "../$ARCHIVE_NAME"
+
+        # Move archive to root for upload
+        mv "../$ARCHIVE_NAME" "../../$ARCHIVE_NAME"
+      shell: bash
+
+    - name: List release files
+      run: |
+        echo ""
+        echo "==================================="
+        echo "Release Files:"
+        echo "==================================="
+        ls -lh ProxyBridge-Linux-*.tar.gz
+
+        echo ""
+        echo "Archive contents:"
+        tar -tzf ProxyBridge-Linux-*.tar.gz
+      shell: bash
+
+    - name: Upload archive to release
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v1
+      with:
+        files: ProxyBridge-Linux-v*.tar.gz
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ProxyBridge-Linux-Release-${{ steps.version.outputs.version }}
+        path: ProxyBridge-Linux-*.tar.gz
+        retention-days: 90
