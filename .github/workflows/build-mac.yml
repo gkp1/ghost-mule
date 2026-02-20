@@ -24,9 +24,8 @@ jobs:
     
     - name: Create xcconfig files
       run: |
-        mkdir -p MacOS/ProxyBridge/config
-        echo "${{ secrets.MACOS_APP_XCCONFIG }}" > MacOS/ProxyBridge/config/Signing-Config-app.xcconfig
-        echo "${{ secrets.MACOS_EXT_XCCONFIG }}" > MacOS/ProxyBridge/config/Signing-Config-ext.xcconfig
+        echo "${{ secrets.MACOS_APP_XCCONFIG }}" > MacOS/ProxyBridge/Signing-Config-app.xcconfig
+        echo "${{ secrets.MACOS_EXT_XCCONFIG }}" > MacOS/ProxyBridge/Signing-Config-ext.xcconfig
 
     - name: Install Provisioning Profiles
       run: |
@@ -136,5 +135,5 @@ jobs:
         rm -f /tmp/certificate.p12 /tmp/app.provisionprofile /tmp/ext.provisionprofile /tmp/ProxyBridge.zip /tmp/ProxyBridge-macOS.zip || true
 
         # Remove xcconfig files with sensitive data
-        rm -f MacOS/ProxyBridge/config/Signing-Config-app.xcconfig || true
-        rm -f MacOS/ProxyBridge/config/Signing-Config-ext.xcconfig || true
+        rm -f MacOS/ProxyBridge/Signing-Config-app.xcconfig || true
+        rm -f MacOS/ProxyBridge/Signing-Config-ext.xcconfig || true
