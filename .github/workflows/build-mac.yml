@@ -95,12 +95,33 @@ jobs:
         # Zip the app for submission
         ditto -c -k --keepParent "$APP_PATH" /tmp/ProxyBridge.zip
 
-        # Submit for notarization and wait for result
-        xcrun notarytool submit /tmp/ProxyBridge.zip \
+        # Submit for notarization and wait for result, capture submission ID
+        SUBMIT_OUTPUT=$(xcrun notarytool submit /tmp/ProxyBridge.zip \
           --apple-id "${{ secrets.APPLE_ID }}" \
           --password "${{ secrets.APPLE_APP_PASSWORD }}" \
           --team-id "${{ secrets.APPLE_TEAM_ID }}" \
-          --wait
+          --wait 2>&1)
+
+        echo "$SUBMIT_OUTPUT"
+
+        # Extract submission ID
+        SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | grep "^  id:" | head -1 | awk '{print $2}')
+        echo "Submission ID: $SUBMISSION_ID"
+
+        # Always fetch the detailed log from Apple
+        if [ -n "$SUBMISSION_ID" ]; then
+          echo "--- Notarization Log ---"
+          xcrun notarytool log "$SUBMISSION_ID" \
+            --apple-id "${{ secrets.APPLE_ID }}" \
+            --password "${{ secrets.APPLE_APP_PASSWORD }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" 2>&1 || true
+        fi
+
+        # Fail if notarization was not accepted
+        if ! echo "$SUBMIT_OUTPUT" | grep -q "status: Accepted"; then
+          echo "Notarization failed!"
+          exit 1
+        fi
 
         # Staple the notarization ticket to the app
         xcrun stapler staple "$APP_PATH"
