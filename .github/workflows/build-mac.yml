@@ -162,11 +162,14 @@ jobs:
         PKG_UNSIGNED="output/ProxyBridge-v${PKG_VERSION}-Universal-Installer.pkg"
         PKG_SIGNED="output/ProxyBridge-v${PKG_VERSION}-Universal-Installer-signed.pkg"
 
-        # Sign pkg with explicit keychain path — no prompting
+        # Sign pkg with explicit keychain — no prompting
         echo "Signing installer..."
+        # Find actual keychain path and unlock it before productsign
+        KEYCHAIN_PATH=$(security list-keychains -d user | grep build | tr -d ' "')
+        echo "Using keychain: $KEYCHAIN_PATH"
+        security unlock-keychain -p "${{ secrets.MACOS_KEYCHAIN_PASSWORD }}" "$KEYCHAIN_PATH"
         productsign \
           --sign "${{ secrets.MACOS_SIGNING_IDENTITY }}" \
-          --keychain ~/Library/Keychains/build.keychain-db \
           "$PKG_UNSIGNED" "$PKG_SIGNED"
         mv "$PKG_SIGNED" "$PKG_UNSIGNED"
 
