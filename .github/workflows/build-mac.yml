@@ -142,20 +142,15 @@ jobs:
 
     - name: Build PKG Installer
       run: |
-        # Create .env for build.sh
-        {
-          echo "APPLE_ID=\"${{ secrets.APPLE_ID }}\""
-          echo "APPLE_APP_PASSWORD=\"${{ secrets.APPLE_APP_PASSWORD }}\""
-          echo "SIGNING_IDENTITY=\"${{ secrets.MACOS_SIGNING_IDENTITY }}\""
-          echo "TEAM_ID=\"${{ secrets.APPLE_TEAM_ID }}\""
-        } > MacOS/ProxyBridge/.env
+        # Write full PKG_ENV secret to .env
+        echo "${{ secrets.PKG_ENV }}" > MacOS/ProxyBridge/.env
 
         # Copy notarized .app into output/ where build.sh expects it
         mkdir -p MacOS/ProxyBridge/output
         cp -R MacOS/ProxyBridge/build/DerivedData/Build/Products/Release/ProxyBridge.app \
           MacOS/ProxyBridge/output/ProxyBridge.app
 
-        # Run build script to create, sign and notarize the pkg
+        # Run build script — creates, signs and notarizes the pkg
         cd MacOS/ProxyBridge
         chmod +x build.sh
         bash build.sh
