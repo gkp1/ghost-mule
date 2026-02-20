@@ -144,18 +144,58 @@ jobs:
       env:
         PKG_ENV_CONTENT: ${{ secrets.PKG_ENV }}
       run: |
-        # Write full PKG_ENV secret to .env via env var to avoid shell parsing issues
-        printf '%s' "$PKG_ENV_CONTENT" > MacOS/ProxyBridge/.env
+        # Write PKG_ENV to .env but strip SIGNING_IDENTITY so build.sh skips signing
+        # (productsign inside build.sh cannot access build.keychain — we do it below)
+        printf '%s' "$PKG_ENV_CONTENT" | grep -v "^SIGNING_IDENTITY" > MacOS/ProxyBridge/.env
 
         # Copy notarized .app into output/ where build.sh expects it
         mkdir -p MacOS/ProxyBridge/output
         cp -R MacOS/ProxyBridge/build/DerivedData/Build/Products/Release/ProxyBridge.app \
           MacOS/ProxyBridge/output/ProxyBridge.app
 
-        # Run build script — creates, signs and notarizes the pkg
+        # Run build script — creates the unsigned .pkg only
         cd MacOS/ProxyBridge
         chmod +x build.sh
         bash build.sh
+
+        PKG_VERSION="3.2.0"
+        PKG_UNSIGNED="output/ProxyBridge-v${PKG_VERSION}-Universal-Installer.pkg"
+        PKG_SIGNED="output/ProxyBridge-v${PKG_VERSION}-Universal-Installer-signed.pkg"
+
+        # Sign pkg with explicit keychain path — no prompting
+        echo "Signing installer..."
+        productsign \
+          --sign "${{ secrets.MACOS_SIGNING_IDENTITY }}" \
+          --keychain ~/Library/Keychains/build.keychain-db \
+          "$PKG_UNSIGNED" "$PKG_SIGNED"
+        mv "$PKG_SIGNED" "$PKG_UNSIGNED"
+
+        # Notarize pkg
+        echo "Notarizing installer..."
+        PKG_SUBMIT_OUTPUT=$(xcrun notarytool submit "$PKG_UNSIGNED" \
+          --apple-id "${{ secrets.APPLE_ID }}" \
+          --password "${{ secrets.APPLE_APP_PASSWORD }}" \
+          --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+          --wait 2>&1)
+
+        echo "$PKG_SUBMIT_OUTPUT"
+
+        PKG_SUBMISSION_ID=$(echo "$PKG_SUBMIT_OUTPUT" | grep "^  id:" | head -1 | awk '{print $2}')
+        if [ -n "$PKG_SUBMISSION_ID" ]; then
+          echo "--- PKG Notarization Log ---"
+          xcrun notarytool log "$PKG_SUBMISSION_ID" \
+            --apple-id "${{ secrets.APPLE_ID }}" \
+            --password "${{ secrets.APPLE_APP_PASSWORD }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" 2>&1 || true
+        fi
+
+        if ! echo "$PKG_SUBMIT_OUTPUT" | grep -q "status: Accepted"; then
+          echo "PKG notarization failed!"
+          exit 1
+        fi
+
+        xcrun stapler staple "$PKG_UNSIGNED"
+        echo "PKG signed, notarized and stapled successfully"
 
     - name: Upload PKG Artifact
       uses: actions/upload-artifact@v4
