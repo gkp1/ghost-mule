@@ -71,6 +71,9 @@ jobs:
         # Allow codesign and productsign to access the keychain without prompting
         security set-key-partition-list -S apple-tool:,apple: -s -k "${{ secrets.MACOS_KEYCHAIN_PASSWORD }}" build.keychain
 
+        # Add build.keychain to the keychain search list so productsign can find the cert
+        security list-keychains -d user -s build.keychain login.keychain-db
+
         # Verify both certificates are available
         security find-identity -v -p codesigning build.keychain
 
@@ -164,20 +167,6 @@ jobs:
         path: MacOS/ProxyBridge/output/ProxyBridge-*.pkg
         retention-days: 30
 
-    - name: Upload Notarized App
-      run: |
-        # Use ditto to zip preserving macOS metadata, symlinks and permissions
-        ditto -c -k --keepParent \
-          "MacOS/ProxyBridge/build/DerivedData/Build/Products/Release/ProxyBridge.app" \
-          /tmp/ProxyBridge-macOS.zip
-
-    - name: Upload Notarized App Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ProxyBridge-macOS
-        path: /tmp/ProxyBridge-macOS.zip
-        retention-days: 30
-
     - name: Cleanup
       if: always()
       run: |
@@ -188,7 +177,7 @@ jobs:
         rm -f ~/Library/MobileDevice/Provisioning\ Profiles/*.provisionprofile || true
 
         # Remove temp cert and profile files
-        rm -f /tmp/certificate.p12 /tmp/installer.p12 /tmp/app.provisionprofile /tmp/ext.provisionprofile /tmp/ProxyBridge.zip /tmp/ProxyBridge-macOS.zip || true
+        rm -f /tmp/certificate.p12 /tmp/installer.p12 /tmp/app.provisionprofile /tmp/ext.provisionprofile /tmp/ProxyBridge.zip || true
 
         # Remove .env with sensitive data
         rm -f MacOS/ProxyBridge/.env || true
