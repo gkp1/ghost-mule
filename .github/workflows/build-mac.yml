@@ -24,12 +24,49 @@ jobs:
     
     - name: Create xcconfig files
       run: |
-        cd MacOS/ProxyBridge
-        cp proxybridge-app.xcconfig Signing-Config-app.xcconfig
-        cp proxybridge-ext.xcconfig Signing-Config-ext.xcconfig
-        sed -i '' 's/DEVELOPMENT_TEAM = L.*/DEVELOPMENT_TEAM = /' Signing-Config-app.xcconfig
-        sed -i '' 's/DEVELOPMENT_TEAM = L.*/DEVELOPMENT_TEAM = /' Signing-Config-ext.xcconfig
-    
+        mkdir -p MacOS/ProxyBridge/config
+        echo "${{ secrets.MACOS_APP_XCCONFIG }}" > MacOS/ProxyBridge/config/Signing-Config-app.xcconfig
+        echo "${{ secrets.MACOS_EXT_XCCONFIG }}" > MacOS/ProxyBridge/config/Signing-Config-ext.xcconfig
+
+    - name: Install Provisioning Profiles
+      run: |
+        mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+
+        echo "${{ secrets.MACOS_APP_PROVISION_PROFILE }}" | base64 --decode > /tmp/app.provisionprofile
+        echo "${{ secrets.MACOS_EXT_PROVISION_PROFILE }}" | base64 --decode > /tmp/ext.provisionprofile
+
+        APP_UUID=$(security cms -D -i /tmp/app.provisionprofile | plutil -extract UUID raw -)
+        EXT_UUID=$(security cms -D -i /tmp/ext.provisionprofile | plutil -extract UUID raw -)
+
+        cp /tmp/app.provisionprofile ~/Library/MobileDevice/Provisioning\ Profiles/${APP_UUID}.provisionprofile
+        cp /tmp/ext.provisionprofile ~/Library/MobileDevice/Provisioning\ Profiles/${EXT_UUID}.provisionprofile
+
+        echo "Installed app profile: ${APP_UUID}"
+        echo "Installed ext profile: ${EXT_UUID}"
+
+    - name: Import Certificate
+      run: |
+        # Decode certificate
+        echo "${{ secrets.MACOS_CERTIFICATE }}" | base64 --decode > /tmp/certificate.p12
+
+        # Create a temporary keychain
+        security create-keychain -p "${{ secrets.MACOS_KEYCHAIN_PASSWORD }}" build.keychain
+        security default-keychain -s build.keychain
+        security unlock-keychain -p "${{ secrets.MACOS_KEYCHAIN_PASSWORD }}" build.keychain
+        security set-keychain-settings -t 3600 -u build.keychain
+
+        # Import certificate into the keychain
+        security import /tmp/certificate.p12 \
+          -k build.keychain \
+          -P "${{ secrets.MACOS_CERTIFICATE_PASSWORD }}" \
+          -T /usr/bin/codesign
+
+        # Allow codesign to access the keychain without prompting
+        security set-key-partition-list -S apple-tool:,apple: -s -k "${{ secrets.MACOS_KEYCHAIN_PASSWORD }}" build.keychain
+
+        # Verify certificate is available
+        security find-identity -v -p codesigning build.keychain
+
     - name: Build Universal Binary
       run: |
         cd MacOS/ProxyBridge
@@ -40,14 +77,64 @@ jobs:
           -derivedDataPath build/DerivedData \
           ARCHS="arm64 x86_64" \
           ONLY_ACTIVE_ARCH=NO \
-          CODE_SIGN_IDENTITY="-" \
-          CODE_SIGNING_REQUIRED=NO \
-          CODE_SIGNING_ALLOWED=NO \
+          OTHER_CODE_SIGN_FLAGS="--keychain build.keychain" \
           clean build
-    
+
     - name: Verify Build
       run: |
         cd MacOS/ProxyBridge
         ls -la build/DerivedData/Build/Products/Release/
         file build/DerivedData/Build/Products/Release/ProxyBridge.app/Contents/MacOS/ProxyBridge
         lipo -archs build/DerivedData/Build/Products/Release/ProxyBridge.app/Contents/MacOS/ProxyBridge
+        # Verify code signature
+        codesign -dv --verbose=4 build/DerivedData/Build/Products/Release/ProxyBridge.app
+
+    - name: Notarize App
+      run: |
+        APP_PATH="MacOS/ProxyBridge/build/DerivedData/Build/Products/Release/ProxyBridge.app"
+
+        # Zip the app for submission
+        ditto -c -k --keepParent "$APP_PATH" /tmp/ProxyBridge.zip
+
+        # Submit for notarization and wait for result
+        xcrun notarytool submit /tmp/ProxyBridge.zip \
+          --apple-id "${{ secrets.APPLE_ID }}" \
+          --password "${{ secrets.APPLE_APP_PASSWORD }}" \
+          --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+          --wait
+
+        # Staple the notarization ticket to the app
+        xcrun stapler staple "$APP_PATH"
+
+        # Verify notarization
+        spctl -a -vvv -t install "$APP_PATH"
+
+    - name: Upload Notarized App
+      run: |
+        # Use ditto to zip preserving macOS metadata, symlinks and permissions
+        ditto -c -k --keepParent \
+          "MacOS/ProxyBridge/build/DerivedData/Build/Products/Release/ProxyBridge.app" \
+          /tmp/ProxyBridge-macOS.zip
+
+    - name: Upload Notarized App Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ProxyBridge-macOS
+        path: /tmp/ProxyBridge-macOS.zip
+        retention-days: 30
+
+    - name: Cleanup
+      if: always()
+      run: |
+        # Delete temporary keychain
+        security delete-keychain build.keychain || true
+
+        # Remove provisioning profiles
+        rm -f ~/Library/MobileDevice/Provisioning\ Profiles/*.provisionprofile || true
+
+        # Remove temp cert and profile files
+        rm -f /tmp/certificate.p12 /tmp/app.provisionprofile /tmp/ext.provisionprofile /tmp/ProxyBridge.zip /tmp/ProxyBridge-macOS.zip || true
+
+        # Remove xcconfig files with sensitive data
+        rm -f MacOS/ProxyBridge/config/Signing-Config-app.xcconfig || true
+        rm -f MacOS/ProxyBridge/config/Signing-Config-ext.xcconfig || true
