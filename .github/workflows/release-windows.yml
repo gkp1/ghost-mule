@@ -5,6 +5,9 @@ on:
     types: [published, created]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-and-release:
     runs-on: self-hosted
@@ -13,11 +16,6 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '10.0.x'
 
     - name: Verify WinDivert installation
       run: |

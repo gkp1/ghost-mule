@@ -1,17 +1,16 @@
-name: Build macOS
+name: Release ProxyBridge macOS
 permissions:
-  contents: read
+  contents: write
 
 on:
-  push:
-    branches: [ dev, main, master ]
-  pull_request:
-    branches: [ dev, main, master ]
+  release:
+    types: [published, created]
   workflow_dispatch:
 
 jobs:
-  build:
+  build-and-release:
     runs-on: macos-latest
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner)
     
     steps:
     - name: Checkout code
@@ -201,6 +200,11 @@ jobs:
 
         xcrun stapler staple "$PKG_UNSIGNED"
         echo "PKG signed, notarized and stapled successfully"
+
+    - name: Upload PKG to Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: MacOS/ProxyBridge/output/ProxyBridge-*.pkg
 
     - name: Upload PKG Artifact
       uses: actions/upload-artifact@v4
