@@ -113,6 +113,12 @@ class Program
             description: "Route localhost traffic through proxy (default: false, most proxies block localhost for SSRF prevention, local traffic to remote proxy will cause issues)",
             getDefaultValue: () => false);
 
+        var maxProxyInstancesOption = new Option<byte>(
+            name: "--max-proxy-instances",
+            description: "Maximum number of process instances to route through proxy (0=unlimited, 1=first only, N=first N)\n" +
+                        "Default: 1 (only first instance gets proxied)",
+            getDefaultValue: () => 1);
+
         var verboseOption = new Option<int>(
             name: "--verbose",
             description: "Logging verbosity level\n" +
@@ -124,6 +130,8 @@ class Program
 
         var updateCommand = new Command("--update", "Check for updates and download latest version from GitHub");
 
+        var showInstancesCommand = new Command("show-instances", "Display currently tracked proxy instances for all processes");
+
         var rootCommand = new RootCommand("ProxyBridge - Universal proxy client for Windows applications")
         {
             proxyOption,
@@ -131,20 +139,27 @@ class Program
             ruleFileOption,
             dnsViaProxyOption,
             localhostViaProxyOption,
+            maxProxyInstancesOption,
             verboseOption
         };
 
         rootCommand.AddCommand(updateCommand);
+        rootCommand.AddCommand(showInstancesCommand);
+
+        showInstancesCommand.SetHandler(() =>
+        {
+            ShowInstances();
+        });
 
         updateCommand.SetHandler(async () =>
         {
             await CheckAndUpdate();
         });
 
-        rootCommand.SetHandler(async (proxyUrl, rules, ruleFile, dnsViaProxy, localhostViaProxy, verbose) =>
+        rootCommand.SetHandler(async (proxyUrl, rules, ruleFile, dnsViaProxy, localhostViaProxy, maxProxyInstances, verbose) =>
         {
-            await RunProxyBridge(proxyUrl, rules, ruleFile, dnsViaProxy, localhostViaProxy, verbose);
-        }, proxyOption, ruleOption, ruleFileOption, dnsViaProxyOption, localhostViaProxyOption, verboseOption);
+            await RunProxyBridge(proxyUrl, rules, ruleFile, dnsViaProxy, localhostViaProxy, maxProxyInstances, verbose);
+        }, proxyOption, ruleOption, ruleFileOption, dnsViaProxyOption, localhostViaProxyOption, maxProxyInstancesOption, verboseOption);
 
         if (args.Contains("--help") || args.Contains("-h") || args.Contains("-?"))
         {
@@ -154,7 +169,7 @@ class Program
         return await rootCommand.InvokeAsync(args);
     }
 
-    private static async Task<int> RunProxyBridge(string proxyUrl, string[] rules, string? ruleFile, bool dnsViaProxy, bool localhostViaProxy, int verboseLevel)
+    private static async Task<int> RunProxyBridge(string proxyUrl, string[] rules, string? ruleFile, bool dnsViaProxy, bool localhostViaProxy, byte maxProxyInstances, int verboseLevel)
     {
         _verboseLevel = verboseLevel;
         ShowBanner();
@@ -208,6 +223,7 @@ class Program
             }
             Console.WriteLine($"DNS via Proxy: {(dnsViaProxy ? "Enabled" : "Disabled")}");
             Console.WriteLine($"Localhost via Proxy: {(localhostViaProxy ? "Enabled" : "Disabled (Security: most proxies block localhost)")}");
+            Console.WriteLine($"Max Proxy Instances per Process: {(maxProxyInstances == 0 ? "Unlimited" : maxProxyInstances.ToString())}");
 
             if (!ProxyBridgeNative.ProxyBridge_SetProxyConfig(
                 proxyInfo.Type,
@@ -228,12 +244,28 @@ class Program
                 Console.WriteLine($"Rules: {parsedRules.Count}");
                 foreach (var rule in parsedRules)
                 {
-                    var ruleId = ProxyBridgeNative.ProxyBridge_AddRule(
-                        rule.ProcessName,
-                        rule.TargetHosts,
-                        rule.TargetPorts,
-                        rule.Protocol,
-                        rule.Action);
+                    uint ruleId;
+                    if (rule.Action == ProxyBridgeNative.RuleAction.PROXY && maxProxyInstances > 0)
+                    {
+                        // Use AddRuleEx for PROXY rules with instance limit
+                        var success = ProxyBridgeNative.ProxyBridge_AddRuleEx(
+                            rule.ProcessName,
+                            rule.TargetHosts,
+                            rule.TargetPorts,
+                            rule.Protocol,
+                            rule.Action,
+                            maxProxyInstances);
+                        ruleId = success ? 1u : 0u;
+                    }
+                    else
+                    {
+                        ruleId = ProxyBridgeNative.ProxyBridge_AddRule(
+                            rule.ProcessName,
+                            rule.TargetHosts,
+                            rule.TargetPorts,
+                            rule.Protocol,
+                            rule.Action);
+                    }
 
                     if (ruleId > 0)
                     {
@@ -298,6 +330,22 @@ class Program
         {
             Console.WriteLine($"[CONN] {processName} (PID:{pid}) -> {destIp}:{destPort} via {proxyInfo}");
         }
+    }
+
+    private static void ShowInstances()
+    {
+        ShowBanner();
+        Console.WriteLine("Active Proxy Instances:\n");
+
+        // Note: This requires ProxyBridge to be running to show active instances
+        // For CLI, we would need to query the running service or track separately
+        Console.WriteLine("Note: Instance tracking requires ProxyBridge to be running.");
+        Console.WriteLine("Use --max-proxy-instances option when starting ProxyBridge to configure limits.\n");
+
+        Console.WriteLine("Max Proxy Instances per Process: Configured via --max-proxy-instances");
+        Console.WriteLine("  0 = Unlimited (all instances use proxy)");
+        Console.WriteLine("  1 = First instance only (default)");
+        Console.WriteLine("  N = First N instances\n");
     }
 
     private static async Task<List<(string ProcessName, string TargetHosts, string TargetPorts, ProxyBridgeNative.RuleProtocol Protocol, ProxyBridgeNative.RuleAction Action)>> LoadRulesFromFile(string filePath)

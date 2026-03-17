@@ -60,6 +60,16 @@ public static class ProxyBridgeNative
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ProxyBridge_AddRuleEx(
+        [MarshalAs(UnmanagedType.LPStr)] string processName,
+        [MarshalAs(UnmanagedType.LPStr)] string targetHosts,
+        [MarshalAs(UnmanagedType.LPStr)] string targetPorts,
+        RuleProtocol protocol,
+        RuleAction action,
+        byte maxProxyInstances);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_EnableRule(uint ruleId);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]

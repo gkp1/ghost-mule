@@ -30,6 +30,7 @@ public class ProxyRuleConfig
     public string Protocol { get; set; } = "TCP";
     public string Action { get; set; } = "PROXY";
     public bool IsEnabled { get; set; } = true;
+    public byte MaxProxyInstances { get; set; } = 1;
 }
 
 [JsonSerializable(typeof(AppConfig))]

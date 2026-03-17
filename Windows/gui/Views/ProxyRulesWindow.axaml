@@ -313,6 +313,23 @@
                     </ComboBox>
                 </StackPanel>
 
+                <!-- Max Proxy Instances Section -->
+                <StackPanel Spacing="6" IsVisible="{Binding IsProxyActionSelected}">
+                    <TextBlock Text="Max Proxy Instances:" Classes="label"/>
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <NumericUpDown x:Name="MaxProxyInstancesInput"
+                                       Value="{Binding MaxProxyInstances}"
+                                       Minimum="0"
+                                       Maximum="255"
+                                       Width="100"
+                                       VerticalAlignment="Center"/>
+                        <TextBlock Text="(0 = unlimited, 1 = first instance only)"
+                                   VerticalAlignment="Center"
+                                   Foreground="#FF999999"
+                                   FontSize="11"/>
+                    </StackPanel>
+                </StackPanel>
+
                 <!-- Validation Error -->
                 <TextBlock Text="{Binding ProcessNameError}"
                            IsVisible="{Binding ProcessNameError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"

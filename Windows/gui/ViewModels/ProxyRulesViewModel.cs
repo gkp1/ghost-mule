@@ -22,6 +22,7 @@ public class ProxyRulesViewModel : ViewModelBase
     private string _newTargetPorts = "*";
     private string _newProtocol = "TCP"; // TCP, UDP, or BOTH
     private string _newProxyAction = "PROXY";
+    private byte _maxProxyInstances = 1;
     private string _processNameError = "";
     private Action<ProxyRule>? _onAddRule;
     private Action? _onClose;
@@ -68,8 +69,20 @@ public class ProxyRulesViewModel : ViewModelBase
     public string NewProxyAction
     {
         get => _newProxyAction;
-        set => SetProperty(ref _newProxyAction, value);
+        set
+        {
+            SetProperty(ref _newProxyAction, value);
+            OnPropertyChanged(nameof(IsProxyActionSelected));
+        }
     }
+
+    public byte MaxProxyInstances
+    {
+        get => _maxProxyInstances;
+        set => SetProperty(ref _maxProxyInstances, value);
+    }
+
+    public bool IsProxyActionSelected => NewProxyAction == "PROXY";
 
     public string ProcessNameError
     {
@@ -112,6 +125,7 @@ public class ProxyRulesViewModel : ViewModelBase
         NewTargetPorts = "*";
         NewProtocol = "TCP";
         NewProxyAction = "PROXY";
+        MaxProxyInstances = 1;
         ProcessNameError = "";
     }
 
@@ -177,18 +191,43 @@ public class ProxyRulesViewModel : ViewModelBase
             }
             else
             {
-                var newRule = new ProxyRule
+                uint ruleId;
+                if (NewProxyAction == "PROXY" && _proxyService != null)
                 {
-                    ProcessName = NewProcessName,
-                    TargetHosts = NewTargetHosts,
-                    TargetPorts = NewTargetPorts,
-                    Protocol = NewProtocol,
-                    Action = NewProxyAction,
-                    IsEnabled = true
-                };
+                    // Use extended API with instance limit for PROXY rules
+                    var success = _proxyService.AddRuleWithInstanceLimit(
+                        NewProcessName, NewTargetHosts, NewTargetPorts,
+                        NewProtocol, NewProxyAction, MaxProxyInstances);
+                    if (success)
+                    {
+                        ruleId = (uint)ProxyRules.Count + 1; // Temporary ID, actual ID from C core
+                    }
+                    else
+                    {
+                        ProcessNameError = "Failed to add rule with instance limit";
+                        return;
+                    }
+                }
+                else
+                {
+                    ruleId = _proxyService?.AddRule(NewProcessName, NewTargetHosts, NewTargetPorts, NewProtocol, NewProxyAction) ?? 0;
+                }
 
-                newRule.PropertyChanged += Rule_PropertyChanged;
-                _onAddRule?.Invoke(newRule);
+                if (ruleId > 0)
+                {
+                    var newRule = new ProxyRule
+                    {
+                        ProcessName = NewProcessName,
+                        TargetHosts = NewTargetHosts,
+                        TargetPorts = NewTargetPorts,
+                        Protocol = NewProtocol,
+                        Action = NewProxyAction,
+                        IsEnabled = true
+                    };
+
+                    newRule.PropertyChanged += Rule_PropertyChanged;
+                    _onAddRule?.Invoke(newRule);
+                }
             }
 
             IsAddRuleViewOpen = false;

@@ -299,6 +299,50 @@ Commands:
 - Use `*` as the process name to set a default action for all traffic
 - Press `Ctrl+C` to stop ProxyBridge
 
+#### Multi-Instance Rotation
+
+Control how many instances of the same process can use the proxy simultaneously. This feature is useful when you want to limit proxy usage to specific application instances.
+
+**Behavior:**
+| Max Instances | 1st Launch | 2nd Launch | 3rd Launch | 4th Launch |
+|---------------|------------|------------|------------|------------|
+| 0 (unlimited) | PROXY      | PROXY      | PROXY      | PROXY      |
+| 1 (default)   | PROXY      | DIRECT     | DIRECT     | DIRECT     |
+| 2             | PROXY      | PROXY      | DIRECT     | DIRECT     |
+| 3             | PROXY      | PROXY      | PROXY      | DIRECT     |
+
+**GUI Usage:**
+1. Open **Proxy Rules** from the menu
+2. Add or edit a rule with **PROXY** action
+3. Set **Max Proxy Instances** value:
+   - `0` = Unlimited (all instances use proxy)
+   - `1` = First instance only (default)
+   - `N` = First N instances
+4. Save the rule
+
+**CLI Usage:**
+```powershell
+# Limit to first instance only (default)
+ProxyBridge_CLI --proxy socks5://127.0.0.1:1080 --rule "game.exe:*:*:TCP:PROXY" --max-proxy-instances 1
+
+# Allow first 3 instances
+ProxyBridge_CLI --proxy socks5://127.0.0.1:1080 --rule "game.exe:*:*:TCP:PROXY" --max-proxy-instances 3
+
+# Unlimited instances (all use proxy)
+ProxyBridge_CLI --proxy socks5://127.0.0.1:1080 --rule "game.exe:*:*:TCP:PROXY" --max-proxy-instances 0
+```
+
+**Important Notes:**
+- The slot is **not freed** when an instance closes (by design)
+- Tracking persists until ProxyBridge restarts or you manually reset
+- Use the **Reset Instance Tracking** button in the GUI or restart the CLI to reset counters
+- Only applies to rules with **PROXY** action
+
+**View Active Instances (CLI):**
+```powershell
+ProxyBridge_CLI show-instances
+```
+
 ## Use Cases
 
 - Redirect proxy-unaware applications (games, desktop apps) through InterceptSuite/Burp Suite for security testing

@@ -49,6 +49,11 @@ public class MainWindowViewModel : ViewModelBase
     private readonly object _activityLogLock = new();
     private DispatcherTimer? _connectionLogTimer;
     private DispatcherTimer? _activityLogTimer;
+    private DispatcherTimer? _instanceRefreshTimer;
+
+    public ObservableCollection<InstanceInfo> ActiveInstances { get; } = new();
+
+    public ICommand ResetInstancesCommand { get; }
 
     public void SetMainWindow(Window window)
     {
@@ -637,6 +642,12 @@ public class MainWindowViewModel : ViewModelBase
             IsAddRuleViewOpen = false;
             NewProcessName = "";
         });
+
+        ResetInstancesCommand = new RelayCommand(() =>
+        {
+            _proxyService?.ResetProcessInstances("*");
+            RefreshActiveInstances();
+        });
     }
 
     public void ChangeLanguage(string languageCode)
@@ -805,6 +816,35 @@ public class MainWindowViewModel : ViewModelBase
         catch { }
     }
 
+    private void RefreshActiveInstances()
+    {
+        if (_proxyService == null) return;
+
+        ActiveInstances.Clear();
+
+        // Get unique process names from rules
+        var processNames = ProxyRules
+            .Where(r => r.Action == "PROXY")
+            .Select(r => r.ProcessName)
+            .Distinct()
+            .ToList();
+
+        foreach (var processName in processNames)
+        {
+            var count = _proxyService.GetProcessInstanceCount(processName);
+            if (count > 0)
+            {
+                var pids = _proxyService.GetProcessPids(processName);
+                ActiveInstances.Add(new InstanceInfo
+                {
+                    ProcessName = processName,
+                    InstanceCount = count,
+                    Pids = string.Join(", ", pids)
+                });
+            }
+        }
+    }
+
     private void QueueActivityLog(string message)
     {
         lock (_activityLogLock)
@@ -879,4 +919,11 @@ public class ProxyRule : ViewModelBase
         get => _isSelected;
         set => SetProperty(ref _isSelected, value);
     }
+}
+
+public class InstanceInfo
+{
+    public string ProcessName { get; set; } = "";
+    public int InstanceCount { get; set; }
+    public string Pids { get; set; } = "";
 }

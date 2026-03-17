@@ -285,7 +285,7 @@ if ($success) {
     Write-Host "Contents:" -ForegroundColor Yellow
     Get-ChildItem $OutputDir | ForEach-Object {
         $size = [math]::Round($_.Length/1MB, 2)
-        Write-Host "  - $($_.Name) ($size MB)" -ForegroundColor Gray
+        Write-Host "  - $($_.Name) (${size} MB)" -ForegroundColor Gray
     }
 
     Write-Host "`nBuilding installer..." -ForegroundColor Green
@@ -305,11 +305,11 @@ if ($success) {
                     Write-Host "`nSigning installer..." -ForegroundColor Green
                     if (Sign-Binary -FilePath "$OutputDir\$installerName") {
                         $installerSize = [math]::Round((Get-Item "$OutputDir\$installerName").Length/1MB, 2)
-                        Write-Host "  Installer ready: $OutputDir\$installerName ($installerSize MB)" -ForegroundColor Cyan
+                        Write-Host "  Installer ready: $OutputDir\$installerName (${installerSize} MB)" -ForegroundColor Cyan
                     }
                 } else {
                     $installerSize = [math]::Round((Get-Item "$OutputDir\$installerName").Length/1MB, 2)
-                    Write-Host "  Installer ready: $OutputDir\$installerName ($installerSize MB)" -ForegroundColor Cyan
+                    Write-Host "  Installer ready: $OutputDir\$installerName (${installerSize} MB)" -ForegroundColor Cyan
                 }
             }
         } else {

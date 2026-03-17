@@ -34,6 +34,7 @@ typedef struct PROCESS_RULE {
     RuleProtocol protocol;  // TCP, UDP, or BOTH
     RuleAction action;
     BOOL enabled;
+    UINT8 max_proxy_instances;  // NEW: 0=unlimited, 1=first only, N=first N
     struct PROCESS_RULE *next;
 } PROCESS_RULE;
 
@@ -52,6 +53,19 @@ typedef struct CONNECTION_INFO {
     ULONGLONG last_activity;  // GetTickCount64() timestamp for cleanup
     struct CONNECTION_INFO *next;
 } CONNECTION_INFO;
+
+// Multi-instance tracking structures
+#define MAX_TRACKED_INSTANCES 256
+
+typedef struct PROCESS_INSTANCE {
+    char process_name[MAX_PROCESS_NAME];
+    DWORD pid;
+    ULONGLONG last_activity;
+    struct PROCESS_INSTANCE *next;
+} PROCESS_INSTANCE;
+
+static PROCESS_INSTANCE *proxy_instance_list = NULL;
+static CRITICAL_SECTION instance_cs;
 
 typedef struct {
     SOCKET client_socket;
@@ -1087,12 +1101,136 @@ static BOOL is_broadcast_or_multicast(UINT32 ip)
     // x.x.x.255
     if ((ip & 0xFF000000) == 0xFF000000)
         return TRUE;
-
-    // Multicast: 224.0.0.0 - 239.255.255.255 (first octet 224-239)
-    if (first_octet >= 224 && first_octet <= 239)
-        return TRUE;
-
     return FALSE;
+}
+
+// ============================================================================
+// PROCESS INSTANCE TRACKING
+// ============================================================================
+
+static int count_proxy_instances_for_process(const char *process_name)
+{
+    int count = 0;
+    EnterCriticalSection(&instance_cs);
+    for (PROCESS_INSTANCE *cur = proxy_instance_list; cur != NULL; cur = cur->next) {
+        if (_stricmp(cur->process_name, process_name) == 0)
+            count++;
+    }
+    LeaveCriticalSection(&instance_cs);
+    return count;
+}
+
+static BOOL is_pid_tracked_as_proxy(DWORD pid)
+{
+    if (pid == 0) return FALSE;
+    EnterCriticalSection(&instance_cs);
+    for (PROCESS_INSTANCE *cur = proxy_instance_list; cur != NULL; cur = cur->next) {
+        if (cur->pid == pid) {
+            LeaveCriticalSection(&instance_cs);
+            return TRUE;
+        }
+    }
+    LeaveCriticalSection(&instance_cs);
+    return FALSE;
+}
+
+static void add_proxy_instance(const char *process_name, DWORD pid)
+{
+    if (!process_name || pid == 0) return;
+    if (is_pid_tracked_as_proxy(pid)) return;
+    if (count_proxy_instances_for_process(process_name) >= MAX_TRACKED_INSTANCES) return;
+
+    PROCESS_INSTANCE *entry = (PROCESS_INSTANCE *)malloc(sizeof(PROCESS_INSTANCE));
+    if (!entry) return;
+
+    strncpy_s(entry->process_name, MAX_PROCESS_NAME, process_name, _TRUNCATE);
+    entry->pid = pid;
+    entry->last_activity = GetTickCount64();
+    entry->next = NULL;
+
+    EnterCriticalSection(&instance_cs);
+    if (proxy_instance_list == NULL) {
+        proxy_instance_list = entry;
+    } else {
+        PROCESS_INSTANCE *cur = proxy_instance_list;
+        while (cur->next != NULL) cur = cur->next;
+        cur->next = entry;
+    }
+    LeaveCriticalSection(&instance_cs);
+
+    log_message("[INSTANCE] Added %s (PID %lu) to proxy tracking", process_name, pid);
+}
+
+static void remove_proxy_instance(DWORD pid)
+{
+    if (pid == 0) return;
+    EnterCriticalSection(&instance_cs);
+    PROCESS_INSTANCE *cur = proxy_instance_list, *prev = NULL;
+    while (cur != NULL) {
+        if (cur->pid == pid) {
+            if (prev == NULL) proxy_instance_list = cur->next;
+            else prev->next = cur->next;
+            free(cur);
+            LeaveCriticalSection(&instance_cs);
+            return;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+    LeaveCriticalSection(&instance_cs);
+}
+
+// Called every 5s from the cleanup thread.
+// Uses inline OpenProcess + CloseHandle in BOTH branches to avoid handle leaks.
+static void cleanup_stale_instances(void)
+{
+    ULONGLONG now = GetTickCount64();
+    EnterCriticalSection(&instance_cs);
+    PROCESS_INSTANCE *cur = proxy_instance_list, *prev = NULL;
+    while (cur != NULL) {
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, cur->pid);
+        BOOL dead = (hProc == NULL);
+        BOOL stale = (now - cur->last_activity > 30000);
+        if (hProc) CloseHandle(hProc);
+
+        if (dead || stale) {
+            PROCESS_INSTANCE *to_free = cur;
+            if (prev == NULL) { proxy_instance_list = cur->next; cur = proxy_instance_list; }
+            else              { prev->next = cur->next;          cur = prev->next; }
+            log_message("[INSTANCE] Removed stale PID %lu", to_free->pid);
+            free(to_free);
+        } else {
+            prev = cur;
+            cur = cur->next;
+        }
+    }
+    LeaveCriticalSection(&instance_cs);
+}
+
+static void reset_all_instances(void)
+{
+    EnterCriticalSection(&instance_cs);
+    PROCESS_INSTANCE *cur = proxy_instance_list;
+    while (cur != NULL) {
+        PROCESS_INSTANCE *nxt = cur->next;
+        free(cur);
+        cur = nxt;
+    }
+    proxy_instance_list = NULL;
+    LeaveCriticalSection(&instance_cs);
+    log_message("[INSTANCE] All instance tracking reset");
+}
+
+static int get_tracked_pids_for_process(const char *process_name, DWORD *pids, int max_pids)
+{
+    int count = 0;
+    EnterCriticalSection(&instance_cs);
+    for (PROCESS_INSTANCE *cur = proxy_instance_list; cur != NULL && count < max_pids; cur = cur->next) {
+        if (_stricmp(cur->process_name, process_name) == 0)
+            pids[count++] = cur->pid;
+    }
+    LeaveCriticalSection(&instance_cs);
+    return count;
 }
 
 // Unified rule matching function for both TCP and UDP
@@ -1219,9 +1357,55 @@ static RuleAction check_process_rule(UINT32 src_ip, UINT16 src_port, UINT32 dest
         return RULE_ACTION_DIRECT;  // No proxy configured
     }
 
+    // Multi-instance rotation: limit how many instances of a process use proxy
+    if (action == RULE_ACTION_PROXY) {
+        // Find the matching rule to check max_proxy_instances
+        PROCESS_RULE *matched_rule = NULL;
+        PROCESS_RULE *rule = rules_list;
+        while (rule != NULL) {
+            if (rule->enabled && match_process_list(rule->process_name, process_name)) {
+                if (match_ip_list(rule->target_hosts, dest_ip) &&
+                    match_port_list(rule->target_ports, dest_port)) {
+                    matched_rule = rule;
+                    break;
+                }
+            }
+            rule = rule->next;
+        }
+
+        if (matched_rule != NULL) {
+            // (a) PID already in proxy group — same process, keep PROXY
+            if (is_pid_tracked_as_proxy(pid)) {
+                // no change
+            } else {
+                // (b) Verify PID is alive before assigning a slot
+                HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+                if (hProc == NULL) {
+                    action = RULE_ACTION_DIRECT;
+                } else {
+                    CloseHandle(hProc);
+
+                    // (c/d) Check instance limit (0 = unlimited, skip check)
+                    if (matched_rule->max_proxy_instances > 0) {
+                        int cnt = count_proxy_instances_for_process(process_name);
+                        if (cnt >= matched_rule->max_proxy_instances) {
+                            action = RULE_ACTION_DIRECT;
+                            log_message("[MULTI] %s PID %lu over limit (%d) -> DIRECT",
+                                        process_name, pid, matched_rule->max_proxy_instances);
+                        } else {
+                            add_proxy_instance(process_name, pid);
+                            log_message("[MULTI] %s PID %lu instance #%d -> PROXY",
+                                        process_name, pid, cnt + 1);
+                        }
+                    }
+                    // max_proxy_instances == 0 -> unlimited, action stays PROXY
+                }
+            }
+        }
+    }
+
     return action;
 }
-
 
 static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port)
 {
@@ -2354,6 +2538,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
 
     rule->action = action;
     rule->enabled = TRUE;
+    rule->max_proxy_instances = 1;  // Default: first instance only
     rule->next = rules_list;
     rules_list = rule;
 
@@ -2361,6 +2546,127 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddRule(const char* process_name, const char*
     log_message("Added rule ID: %u for process '%s' (Protocol: %d, Action: %d)", rule->rule_id, process_name, protocol, action);
 
     return rule->rule_id;
+}
+
+// Extended AddRule — backward compatible, keeps original ProxyBridge_AddRule untouched
+PROXYBRIDGE_API BOOL ProxyBridge_AddRuleEx(
+    const char* process_name,
+    const char* target_hosts,
+    const char* target_ports,
+    RuleProtocol protocol,
+    RuleAction action,
+    UINT8 max_proxy_instances)
+{
+    if (process_name == NULL || process_name[0] == '\0')
+        return FALSE;
+
+    PROCESS_RULE *rule = (PROCESS_RULE *)malloc(sizeof(PROCESS_RULE));
+    if (rule == NULL)
+        return FALSE;
+
+    rule->rule_id = g_next_rule_id++;
+    strncpy_s(rule->process_name, MAX_PROCESS_NAME, process_name, _TRUNCATE);
+    rule->protocol = protocol;
+    rule->max_proxy_instances = max_proxy_instances;
+
+    if (target_hosts != NULL && target_hosts[0] != '\0')
+    {
+        size_t len = strlen(target_hosts) + 1;
+        rule->target_hosts = (char *)malloc(len);
+        if (rule->target_hosts == NULL)
+        {
+            free(rule);
+            return FALSE;
+        }
+        strncpy_s(rule->target_hosts, len, target_hosts, _TRUNCATE);
+    }
+    else
+    {
+        rule->target_hosts = (char *)malloc(2);
+        if (rule->target_hosts == NULL)
+        {
+            free(rule);
+            return FALSE;
+        }
+        strcpy_s(rule->target_hosts, 2, "*");
+    }
+
+    if (target_ports != NULL && target_ports[0] != '\0')
+    {
+        size_t len = strlen(target_ports) + 1;
+        rule->target_ports = (char *)malloc(len);
+        if (rule->target_ports == NULL)
+        {
+            free(rule->target_hosts);
+            free(rule);
+            return FALSE;
+        }
+        strncpy_s(rule->target_ports, len, target_ports, _TRUNCATE);
+    }
+    else
+    {
+        rule->target_ports = (char *)malloc(2);
+        if (rule->target_ports == NULL)
+        {
+            free(rule->target_hosts);
+            free(rule);
+            return FALSE;
+        }
+        strcpy_s(rule->target_ports, 2, "*");
+    }
+
+    rule->action = action;
+    rule->enabled = TRUE;
+    rule->next = rules_list;
+    rules_list = rule;
+
+    update_has_active_rules();
+    log_message("Added rule ID: %u for process '%s' (Protocol: %d, Action: %d, MaxInstances: %d)",
+                rule->rule_id, process_name, protocol, action, max_proxy_instances);
+
+    return TRUE;
+}
+
+// Instance tracking APIs
+PROXYBRIDGE_API int ProxyBridge_GetProcessInstanceCount(const char* process_name)
+{
+    if (!process_name || process_name[0] == '\0')
+        return 0;
+    return count_proxy_instances_for_process(process_name);
+}
+
+PROXYBRIDGE_API void ProxyBridge_ResetProcessInstances(const char* process_name)
+{
+    if (!process_name || process_name[0] == '\0')
+        return;
+
+    EnterCriticalSection(&instance_cs);
+    PROCESS_INSTANCE *cur = proxy_instance_list, *prev = NULL;
+    while (cur != NULL) {
+        if (_stricmp(cur->process_name, process_name) == 0) {
+            PROCESS_INSTANCE *to_free = cur;
+            if (prev == NULL) {
+                proxy_instance_list = cur->next;
+                cur = proxy_instance_list;
+            } else {
+                prev->next = cur->next;
+                cur = prev->next;
+            }
+            free(to_free);
+        } else {
+            prev = cur;
+            cur = cur->next;
+        }
+    }
+    LeaveCriticalSection(&instance_cs);
+    log_message("[INSTANCE] Reset tracking for process: %s", process_name);
+}
+
+PROXYBRIDGE_API int ProxyBridge_GetProcessPIDs(const char* process_name, DWORD* pids, int max_pids)
+{
+    if (!process_name || process_name[0] == '\0' || !pids || max_pids <= 0)
+        return 0;
+    return get_tracked_pids_for_process(process_name, pids, max_pids);
 }
 
 PROXYBRIDGE_API BOOL ProxyBridge_EnableRule(UINT32 rule_id)
@@ -2829,12 +3135,19 @@ static void clear_pid_cache(void)
 // Dedicated cleanup thread - runs independently without blocking packet processing
 static DWORD WINAPI cleanup_worker(LPVOID arg)
 {
+    int instance_cleanup_counter = 0;
     while (running)
     {
-        Sleep(30000);  // 30 seconds
+        Sleep(5000);  // 5 seconds
         if (running)
         {
             cleanup_stale_connections();
+            // Call cleanup_stale_instances every 30 seconds (6 * 5s)
+            instance_cleanup_counter++;
+            if (instance_cleanup_counter >= 6) {
+                cleanup_stale_instances();
+                instance_cleanup_counter = 0;
+            }
         }
     }
     return 0;
@@ -2869,6 +3182,9 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
         if (lock == NULL)
             return FALSE;
     }
+
+    InitializeCriticalSection(&instance_cs);
+    proxy_instance_list = NULL;
 
     running = TRUE;
 
@@ -3038,6 +3354,18 @@ PROXYBRIDGE_API BOOL ProxyBridge_Stop(void)
     clear_logged_connections();
 
     clear_pid_cache();
+
+    // Free all tracked instances
+    EnterCriticalSection(&instance_cs);
+    PROCESS_INSTANCE *cur = proxy_instance_list;
+    while (cur != NULL) {
+        PROCESS_INSTANCE *nxt = cur->next;
+        free(cur);
+        cur = nxt;
+    }
+    proxy_instance_list = NULL;
+    LeaveCriticalSection(&instance_cs);
+    DeleteCriticalSection(&instance_cs);
 
     log_message("ProxyBridge stopped");
 

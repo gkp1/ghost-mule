@@ -90,6 +90,32 @@ public static class ProxyBridgeNative
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_MoveRuleToPosition(uint ruleId, uint newPosition);
 
+    // Extended AddRule with multi-instance support
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ProxyBridge_AddRuleEx(
+        [MarshalAs(UnmanagedType.LPStr)] string processName,
+        [MarshalAs(UnmanagedType.LPStr)] string targetHosts,
+        [MarshalAs(UnmanagedType.LPStr)] string targetPorts,
+        RuleProtocol protocol,
+        RuleAction action,
+        byte maxProxyInstances);
+
+    // Instance tracking APIs
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int ProxyBridge_GetProcessInstanceCount(
+        [MarshalAs(UnmanagedType.LPStr)] string processName);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern void ProxyBridge_ResetProcessInstances(
+        [MarshalAs(UnmanagedType.LPStr)] string processName);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int ProxyBridge_GetProcessPIDs(
+        [MarshalAs(UnmanagedType.LPStr)] string processName,
+        [Out] uint[] pids,
+        int maxPids);
+
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ProxyBridge_SetProxyConfig(

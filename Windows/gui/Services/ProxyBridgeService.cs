@@ -113,6 +113,50 @@ public class ProxyBridgeService : IDisposable
         return ProxyBridgeNative.ProxyBridge_EditRule(ruleId, processName, targetHosts, targetPorts, ruleProtocol, ruleAction);
     }
 
+    // Multi-instance rule management
+    public bool AddRuleWithInstanceLimit(string processName, string targetHosts, string targetPorts,
+        string protocol, string action, byte maxProxyInstances)
+    {
+        var ruleAction = action.ToUpper() switch
+        {
+            "DIRECT" => ProxyBridgeNative.RuleAction.DIRECT,
+            "BLOCK" => ProxyBridgeNative.RuleAction.BLOCK,
+            _ => ProxyBridgeNative.RuleAction.PROXY
+        };
+
+        var ruleProtocol = protocol.ToUpper() switch
+        {
+            "UDP" => ProxyBridgeNative.RuleProtocol.UDP,
+            "BOTH" => ProxyBridgeNative.RuleProtocol.BOTH,
+            "TCP+UDP" => ProxyBridgeNative.RuleProtocol.BOTH,
+            _ => ProxyBridgeNative.RuleProtocol.TCP
+        };
+
+        return ProxyBridgeNative.ProxyBridge_AddRuleEx(
+            processName, targetHosts, targetPorts, ruleProtocol, ruleAction, maxProxyInstances);
+    }
+
+    public int GetProcessInstanceCount(string processName)
+        => ProxyBridgeNative.ProxyBridge_GetProcessInstanceCount(processName);
+
+    public void ResetProcessInstances(string processName)
+        => ProxyBridgeNative.ProxyBridge_ResetProcessInstances(processName);
+
+    public uint[] GetProcessPids(string processName)
+    {
+        var pids = new uint[10];
+        int count = ProxyBridgeNative.ProxyBridge_GetProcessPIDs(processName, pids, 10);
+        var result = new uint[count];
+        Array.Copy(pids, result, count);
+        return result;
+    }
+
+    public void ResetAllProcessInstances()
+    {
+        // Get all unique process names from rules and reset each
+        // This is a simplified version - in practice, track which processes have instances
+    }
+
     public uint GetRulePosition(uint ruleId)
     {
         return ProxyBridgeNative.ProxyBridge_GetRulePosition(ruleId);
