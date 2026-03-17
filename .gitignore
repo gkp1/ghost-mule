@@ -13,6 +13,7 @@ Windows/cli/bin/**
 Windows/cli/obj/**
 .vscode/**
 Windows/output/ProxyBridge_CLI.pdb
+local/**
 
 ## macOS / Xcode / Swift
 
