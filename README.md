@@ -22,7 +22,7 @@ _You need a proxy ip, which you can get 10 for free from [webshare.io](https://w
 
 <img width="580" height="919" alt="image" src="https://github.com/user-attachments/assets/c2ea503d-9a2a-4510-a04d-9321188f6f08" />
 
-### 4. Click **Proxy** -> **Proxy Rules** -> **ADD** -> Literally just type **RotMG Exalt.exe** (CASE SENSITIVE) -> **Save**:
+### 4. Click **Proxy** -> **Proxy Rules** -> **ADD** -> Literally just type **RotMG Exalt.exe** (CASE SENSITIVE) -> Leave 'max proxy instances' set to 1 -> **Save**:
 
 <img width="902" height="706" alt="image" src="https://github.com/user-attachments/assets/0d086d29-5e2a-45f9-b237-e2867f77aae3" />
 
