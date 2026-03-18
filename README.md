@@ -9,13 +9,18 @@
 
 Requirements: 
 
-- You need a proxy ip, which you can get 10 for free from [webshare.io](https://www.webshare.io/) or other proxy sites. Just make a free account.
+_You need a proxy ip, which you can get 10 for free from [webshare.io](https://www.webshare.io/) or other proxy sites. Just make a free account._
 
-1. Download the [Release .zip](https://github.com/gkp1/ghost-mule/releases/download/3.2.1/ProxyBridge-Windows-Portable-v3.2.1.zip) and extract it to any folder you want e.g Documents folder (+ send a shortcut of ProxyBridge.exe to your desktop)
-2. Run ProxyBridge.exe as admin, and allow all network permissions when prompted so it can intercept+proxy requests etc
-3. Click **Proxy** -> **Proxy Settings** -> Fill your proxy creds from webshare:
+### 1. Download the [Release .zip](https://github.com/gkp1/ghost-mule/releases/download/3.2.1/ProxyBridge-Windows-Portable-v3.2.1.zip) and extract it to any folder you want e.g Documents folder (+ send a shortcut of ProxyBridge.exe to your desktop)
+
+### 2. Run ProxyBridge.exe as admin, and allow all network permissions when prompted so it can intercept+proxy requests etc
+
+### 3. Click **Proxy** -> **Proxy Settings** -> Fill your proxy creds from webshare -> **test** -> **Save**:
+
 <img width="580" height="919" alt="image" src="https://github.com/user-attachments/assets/c2ea503d-9a2a-4510-a04d-9321188f6f08" />
-4. Click **Proxy** -> **Proxy Rules** -> **ADD** -> Literally just type **RotMG Exalt.exe** (CASE SENSITIVE)
+
+### 4. Click **Proxy** -> **Proxy Rules** -> **ADD** -> Literally just type **RotMG Exalt.exe** (CASE SENSITIVE) -> **Save**:
+
 <img width="902" height="706" alt="image" src="https://github.com/user-attachments/assets/0d086d29-5e2a-45f9-b237-e2867f77aae3" />
 
 - Done. Now whenever you need to mule just open ProxyBridge and run your 2 games and it will auto proxy the first process so you can connect both.
