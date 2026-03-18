@@ -2,6 +2,9 @@
  **✅ MODIFIED VERSION**  
  This is a forked/modified version of ProxyBridge with 1 simple feature added which is the ability to run the same process, e.g game.exe with a proxy, and a second instance of the same game.exe without a proxy. 
  - Configurable in the UI Proxy -> Proxy Rules -> Edit proxy:
+
+<img width="341" height="75" alt="image" src="https://github.com/user-attachments/assets/6b3e805c-3076-4514-a434-80e67a10d11b" />
+ 
 - Purpose: Bypassing RotMG's new "1 account per ip" blocks so we can trading between 2 accounts and use mule accounts for storage
 - It's as simple as: you follow steps below to configure ProxyBridge. After it's configured you just open it and leave it running and then just open 2 exalt processes using [Exalt Account Manager](https://github.com/MaikEight/ExaltAccountManager). ProxyBridge will automatically detect your opened .exes and proxy the first RotMG Exalt.exe process through the proxy and DIRECT connect the second instance.
 
@@ -25,7 +28,7 @@ _You need a proxy ip, which you can get 10 for free from [webshare.io](https://w
 
 - Done. Now whenever you need to mule just open ProxyBridge and run your 2 games and it will auto proxy the first process so you can connect both.
 
-- This is not a proxy rotation which means this is not really made for multiboxing or any sort of 'cheating', I don't plan on adding multi-proxy rotation to this. This is meant to be a simple Deca China's Firewall bypass.
+- This is not a proxy rotation feature which means this is not really made for multiboxing or any sort of 'cheating', I don't plan on adding multi-proxy rotation to this. This is meant to be a simple Deca China's Firewall bypass for muling mostly on 2 accs open at the same time.
 
 
 Adds the ability to control how many instances of the same process
