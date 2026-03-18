@@ -22,7 +22,7 @@ _You need a proxy ip, which you can get 10 for free from [webshare.io](https://w
 
 <img width="580" height="919" alt="image" src="https://github.com/user-attachments/assets/c2ea503d-9a2a-4510-a04d-9321188f6f08" />
 
-### 4. Click **Proxy** -> **Proxy Rules** -> **ADD** -> Literally just type **RotMG Exalt.exe** (CASE SENSITIVE) -> Leave 'max proxy instances' set to 1 -> **Save**:
+### 4. Click **Proxy** -> **Proxy Rules** -> **ADD** -> Just type `RotMG Exalt.exe` (CASE SENSITIVE) -> Leave `max proxy instances` set to 1 -> **Save**:
 
 <img width="902" height="706" alt="image" src="https://github.com/user-attachments/assets/0d086d29-5e2a-45f9-b237-e2867f77aae3" />
 
@@ -31,11 +31,9 @@ _You need a proxy ip, which you can get 10 for free from [webshare.io](https://w
 - This is not a proxy rotation feature which means this is not really made for multiboxing or any sort of 'cheating', I don't plan on adding multi-proxy rotation to this. This is meant to be a simple Deca China's Firewall bypass for muling mostly on 2 accs open at the same time.
 
 
-Adds the ability to control how many instances of the same process
-can use the proxy (default: 1). First N instances get PROXY, rest
-get DIRECT. Includes C core tracking, new APIs, GUI controls, CLI
-options, and full documentation.
-
+> Adds the ability to control how many instances of the same process can use the proxy (default: 1). 
+> First N instances get PROXY, rest get DIRECT. 
+> Includes C core tracking, new APIs, GUI controls, CLI options, and full documentation.
 
 > + Implemented the following changes in this fork:
 > - Added portable build scripts (`build-portable.ps1`, `make-portable.ps1`) for creating self-contained zip releases
