@@ -34,13 +34,19 @@ get DIRECT. Includes C core tracking, new APIs, GUI controls, CLI
 options, and full documentation.
 
 
-> + Implemented the following changes:
+> + Implemented the following changes in this fork:
 > - Added portable build scripts (`build-portable.ps1`, `make-portable.ps1`) for creating self-contained zip releases
 > - Fixed `compile.ps1` syntax errors for Windows builds
 > - Added `SelfContained=true` to GUI project for runtime-independent portable builds
 > - Updated build pipeline to properly package WinDivert driver with releases
 > 
 > **Building from Source:** Requires .NET SDK (download from Microsoft) and WinDivert library (download and extract to `C:\WinDivert-2.2.2-A`). Run `.\build-portable.ps1 -Version "3.2.1"` to create a portable zip. Verify built binary hash with releases using PowerShell: `Get-FileHash releases\ProxyBridge-Windows-Portable-v3.2.1.zip`
+
+--------------------- 
+
+### _Original readme:_
+
+--------------------- 
 
 <p align="center">
   <img src="img/logo.png" alt="ProxyBridge Logo" />
