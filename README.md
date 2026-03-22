@@ -1,46 +1,77 @@
 # ProxyBridge
- **✅ MODIFIED VERSION**  
- This is a forked/modified version of ProxyBridge with 1 simple feature added which is the ability to run the same process, e.g game.exe with a proxy, and a second instance of the same game.exe without a proxy. 
- - Configurable in the UI Proxy -> Proxy Rules -> Edit proxy:
+**Fork by gkp1** — Modified version with dual-instance proxy support (RotMG Exalt bypass)
 
-<img width="341" height="75" alt="image" src="https://github.com/user-attachments/assets/6b3e805c-3076-4514-a434-80e67a10d11b" />
- 
-- Purpose: Bypassing RotMG's new "1 account per ip" blocks so we can trading between 2 accounts and use mule accounts for storage
-- It's as simple as: you follow steps below to configure ProxyBridge. After it's configured you just open it and leave it running and then just open 2 exalt processes using [Exalt Account Manager](https://github.com/MaikEight/ExaltAccountManager). ProxyBridge will automatically detect your opened .exes and proxy the first RotMG Exalt.exe process through the proxy and DIRECT connect the second instance.
+## Table of Contents
+1. [Overview](#1-overview)
+2. [Setup Steps](#2-setup-steps)
+3. [How It Works](#3-how-it-works)
+4. [Build From Source](#4-build-from-source)
+5. [Original README](#5-original-readme)
 
-## Step by step:
+---
 
-Requirements: 
+## 1. Overview
 
-_You need a proxy ip, which you can get 10 for free from [webshare.io](https://www.webshare.io/) or other proxy sites. Just make a free account._
+This fork adds one key feature: run the same process (e.g. `game.exe`) through a proxy on the **first instance**, and **direct connect** on the second — without needing separate proxy settings per application.
 
-### 1. Download the [Release .zip](https://github.com/gkp1/ghost-mule/releases/download/v3.2.2/ProxyBridge-Windows-Portable-v3.2.2.zip) and extract it to any folder you want e.g Documents folder (+ send a shortcut of ProxyBridge.exe to your desktop)
+**Purpose:** Bypassing RotMG's "1 account per IP" block to trade between 2 accounts and mule between accounts.
 
-### 2. Run ProxyBridge.exe as admin, and allow all network permissions when prompted so it can intercept+proxy requests etc
+**Requirements:** A proxy IP (free at [webshare.io](https://www.webshare.io/) or similar).
 
-### 3. Click **Proxy** -> **Proxy Settings** -> Fill your proxy creds from webshare -> **test** -> **Save**:
+---
+
+## 2. Setup Steps
+
+### Step 1 — Download & Install
+
+Download the **[Release .zip](https://github.com/gkp1/ghost-mule/releases/download/v3.2.2/ProxyBridge-Windows-Portable-v3.2.2.zip)** and extract to any folder (e.g. Documents). Optionally send a shortcut to your desktop.
+
+### Step 2 — Run as Admin
+
+Launch `ProxyBridge.exe` as administrator and allow all network permissions when prompted.
+
+### Step 3 — Configure Proxy
+
+Click **Proxy → Proxy Settings** → fill your proxy credentials → **Test** → **Save**:
 
 <img width="580" height="919" alt="image" src="https://github.com/user-attachments/assets/c2ea503d-9a2a-4510-a04d-9321188f6f08" />
 
-### 4. Click **Proxy** -> **Proxy Rules** -> **ADD** -> Just type `RotMG Exalt.exe` (CASE SENSITIVE) -> Leave `max proxy instances` set to 1 -> **Save**:
+### Step 4 — Add Proxy Rule
+
+Click **Proxy → Proxy Rules → Add** → type `RotMG Exalt.exe` (case sensitive) → leave `max proxy instances` at **1** → **Save**:
 
 <img width="902" height="706" alt="image" src="https://github.com/user-attachments/assets/0d086d29-5e2a-45f9-b237-e2867f77aae3" />
 
- - Done. Now whenever you need to mule just open ProxyBridge and run your 2 games and it will auto proxy the first process so you can connect both.
+---
 
- - This is not a proxy rotation feature which means this is not really made for multiboxing or any sort of 'cheating'. I don't plan on adding multi-proxy rotation to this. This is meant to be a simple Deca China's Firewall bypass for muling mostly on 2 accs open at the same time.
+## 3. How It Works
 
- ---
+Open ProxyBridge and leave it running. Launch 2 Exalt processes using **[Exalt Account Manager](https://github.com/MaikEight/ExaltAccountManager)**. ProxyBridge will automatically:
+- Route the **first** RotMG Exalt.exe through the proxy
+- **Direct connect** the second instance
 
- ### 🔐 Don't Trust Prebuilt Binaries?
+> [!NOTE]
+> This is **not** a proxy rotation tool — it's a simple dual-instance bypass for muling between 2 accounts. No multiboxing or cheating features planned.
 
- If you don't want to trust my releases, build it yourself: Install [.NET SDK](https://dotnet.microsoft.com/download), download [WinDivert](https://reqrypt.org/windivert.html) to `C:\WinDivert-2.2.2-A`, then run `.\build-portable.ps1 -Version "3.2.2"`. Your .zip will be in `releases/`. Compare `Get-FileHash` with the release to verify they're identical.
+---
 
- ---
+## 4. Build From Source
 
-### _Original readme:_
+Don't trust prebuilt binaries? Build it yourself:
 
---------------------- 
+1. Install the [.NET SDK](https://dotnet.microsoft.com/download)
+2. Download [WinDivert](https://reqrypt.org/windivert.html) to `C:\WinDivert-2.2.2-A`
+3. Run `.\build-portable.ps1 -Version "3.2.2"`
+
+Your `.zip` will be in `releases/`. Use `Get-FileHash` to verify against the official release.
+
+---
+
+## 5. Original README
+
+---
+
+
 
 <p align="center">
   <img src="img/logo.png" alt="ProxyBridge Logo" />
