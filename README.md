@@ -1,13 +1,53 @@
 # ProxyBridge
+ **✅ MODIFIED VERSION**  
+ This is a forked/modified version of ProxyBridge with 1 simple feature added which is the ability to run the same process, e.g game.exe with a proxy, and a second instance of the same game.exe without a proxy. 
+ - Configurable in the UI Proxy -> Proxy Rules -> Edit proxy:
 
-> **⚠️ MODIFIED VERSION**  
-> This is a forked/modified version of ProxyBridge with the following changes:
+<img width="341" height="75" alt="image" src="https://github.com/user-attachments/assets/6b3e805c-3076-4514-a434-80e67a10d11b" />
+ 
+- Purpose: Bypassing RotMG's new "1 account per ip" blocks so we can trading between 2 accounts and use mule accounts for storage
+- It's as simple as: you follow steps below to configure ProxyBridge. After it's configured you just open it and leave it running and then just open 2 exalt processes using [Exalt Account Manager](https://github.com/MaikEight/ExaltAccountManager). ProxyBridge will automatically detect your opened .exes and proxy the first RotMG Exalt.exe process through the proxy and DIRECT connect the second instance.
+
+## Step by step:
+
+Requirements: 
+
+_You need a proxy ip, which you can get 10 for free from [webshare.io](https://www.webshare.io/) or other proxy sites. Just make a free account._
+
+### 1. Download the [Release .zip](https://github.com/gkp1/ghost-mule/releases/download/3.2.1/ProxyBridge-Windows-Portable-v3.2.1.zip) and extract it to any folder you want e.g Documents folder (+ send a shortcut of ProxyBridge.exe to your desktop)
+
+### 2. Run ProxyBridge.exe as admin, and allow all network permissions when prompted so it can intercept+proxy requests etc
+
+### 3. Click **Proxy** -> **Proxy Settings** -> Fill your proxy creds from webshare -> **test** -> **Save**:
+
+<img width="580" height="919" alt="image" src="https://github.com/user-attachments/assets/c2ea503d-9a2a-4510-a04d-9321188f6f08" />
+
+### 4. Click **Proxy** -> **Proxy Rules** -> **ADD** -> Just type `RotMG Exalt.exe` (CASE SENSITIVE) -> Leave `max proxy instances` set to 1 -> **Save**:
+
+<img width="902" height="706" alt="image" src="https://github.com/user-attachments/assets/0d086d29-5e2a-45f9-b237-e2867f77aae3" />
+
+- Done. Now whenever you need to mule just open ProxyBridge and run your 2 games and it will auto proxy the first process so you can connect both.
+
+- This is not a proxy rotation feature which means this is not really made for multiboxing or any sort of 'cheating', I don't plan on adding multi-proxy rotation to this. This is meant to be a simple Deca China's Firewall bypass for muling mostly on 2 accs open at the same time.
+
+
+> Adds the ability to control how many instances of the same process can use the proxy (default: 1). 
+> First N instances get PROXY, rest get DIRECT. 
+> Includes C core tracking, new APIs, GUI controls, CLI options, and full documentation.
+
+> + Implemented the following changes in this fork:
 > - Added portable build scripts (`build-portable.ps1`, `make-portable.ps1`) for creating self-contained zip releases
 > - Fixed `compile.ps1` syntax errors for Windows builds
 > - Added `SelfContained=true` to GUI project for runtime-independent portable builds
 > - Updated build pipeline to properly package WinDivert driver with releases
 > 
 > **Building from Source:** Requires .NET SDK (download from Microsoft) and WinDivert library (download and extract to `C:\WinDivert-2.2.2-A`). Run `.\build-portable.ps1 -Version "3.2.1"` to create a portable zip. Verify built binary hash with releases using PowerShell: `Get-FileHash releases\ProxyBridge-Windows-Portable-v3.2.1.zip`
+
+--------------------- 
+
+### _Original readme:_
+
+--------------------- 
 
 <p align="center">
   <img src="img/logo.png" alt="ProxyBridge Logo" />
