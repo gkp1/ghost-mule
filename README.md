@@ -41,7 +41,7 @@ _You need a proxy ip, which you can get 10 for free from [webshare.io](https://w
 > - Added `SelfContained=true` to GUI project for runtime-independent portable builds
 > - Updated build pipeline to properly package WinDivert driver with releases
 > 
-> **Building from Source:** Requires .NET SDK (download from Microsoft) and WinDivert library (download and extract to `C:\WinDivert-2.2.2-A`). Run `.\build-portable.ps1 -Version "3.2.1"` to create a portable zip. Verify built binary hash with releases using PowerShell: `Get-FileHash releases\ProxyBridge-Windows-Portable-v3.2.1.zip`
+> **Building from Source:** Requires .NET SDK (download from Microsoft) and WinDivert library (download and extract to `C:\WinDivert-2.2.2-A`). Run `.\build-portable.ps1 -Version "3.2.2"` to create a portable zip. Verify built binary hash with releases using PowerShell: `Get-FileHash releases\ProxyBridge-Windows-Portable-v3.2.2.zip`
 
 --------------------- 
 
