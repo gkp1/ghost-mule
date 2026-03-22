@@ -1,5 +1,8 @@
-# ProxyBridge
-**Fork by gkp1** — Modified version with dual-instance proxy support (RotMG Exalt bypass)
+# ghost mule
+
+<img width="600" height="300" alt="image" src="https://github.com/user-attachments/assets/4f92d252-696c-4118-bb23-1a503e1e101a" />
+
+ProxyBridge fork - added dual-instance proxy support (RotMG Exalt bypass)
 
 ## Table of Contents
 1. [Overview](#1-overview)
