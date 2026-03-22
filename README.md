@@ -26,24 +26,17 @@ _You need a proxy ip, which you can get 10 for free from [webshare.io](https://w
 
 <img width="902" height="706" alt="image" src="https://github.com/user-attachments/assets/0d086d29-5e2a-45f9-b237-e2867f77aae3" />
 
-- Done. Now whenever you need to mule just open ProxyBridge and run your 2 games and it will auto proxy the first process so you can connect both.
+ - Done. Now whenever you need to mule just open ProxyBridge and run your 2 games and it will auto proxy the first process so you can connect both.
 
-- This is not a proxy rotation feature which means this is not really made for multiboxing or any sort of 'cheating', I don't plan on adding multi-proxy rotation to this. This is meant to be a simple Deca China's Firewall bypass for muling mostly on 2 accs open at the same time.
+ - This is not a proxy rotation feature which means this is not really made for multiboxing or any sort of 'cheating'. I don't plan on adding multi-proxy rotation to this. This is meant to be a simple Deca China's Firewall bypass for muling mostly on 2 accs open at the same time.
 
+ ---
 
-> Adds the ability to control how many instances of the same process can use the proxy (default: 1). 
-> First N instances get PROXY, rest get DIRECT. 
-> Includes C core tracking, new APIs, GUI controls, CLI options, and full documentation.
+ ### 🔐 Don't Trust Prebuilt Binaries?
 
-> + Implemented the following changes in this fork:
-> - Added portable build scripts (`build-portable.ps1`, `make-portable.ps1`) for creating self-contained zip releases
-> - Fixed `compile.ps1` syntax errors for Windows builds
-> - Added `SelfContained=true` to GUI project for runtime-independent portable builds
-> - Updated build pipeline to properly package WinDivert driver with releases
-> 
-> **Building from Source:** Requires .NET SDK (download from Microsoft) and WinDivert library (download and extract to `C:\WinDivert-2.2.2-A`). Run `.\build-portable.ps1 -Version "3.2.2"` to create a portable zip. Verify built binary hash with releases using PowerShell: `Get-FileHash releases\ProxyBridge-Windows-Portable-v3.2.2.zip`
+ If you don't want to trust my releases, build it yourself: Install [.NET SDK](https://dotnet.microsoft.com/download), download [WinDivert](https://reqrypt.org/windivert.html) to `C:\WinDivert-2.2.2-A`, then run `.\build-portable.ps1 -Version "3.2.2"`. Your .zip will be in `releases/`. Compare `Get-FileHash` with the release to verify they're identical.
 
---------------------- 
+ ---
 
 ### _Original readme:_
 
