@@ -1180,24 +1180,23 @@ static void remove_proxy_instance(DWORD pid)
     LeaveCriticalSection(&instance_cs);
 }
 
-// Called every 5s from the cleanup thread.
-// Uses inline OpenProcess + CloseHandle in BOTH branches to avoid handle leaks.
+// Cleanup thread only removes PIDs when the process is confirmed dead.
+// Time-based removal is disabled to prevent active PIDs from being removed
+// during periods of network inactivity (e.g., idle in game).
 static void cleanup_stale_instances(void)
 {
-    ULONGLONG now = GetTickCount64();
     EnterCriticalSection(&instance_cs);
     PROCESS_INSTANCE *cur = proxy_instance_list, *prev = NULL;
     while (cur != NULL) {
         HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, cur->pid);
         BOOL dead = (hProc == NULL);
-        BOOL stale = (now - cur->last_activity > 30000);
         if (hProc) CloseHandle(hProc);
 
-        if (dead || stale) {
+        if (dead) {
             PROCESS_INSTANCE *to_free = cur;
             if (prev == NULL) { proxy_instance_list = cur->next; cur = proxy_instance_list; }
             else              { prev->next = cur->next;          cur = prev->next; }
-            log_message("[INSTANCE] Removed stale PID %lu", to_free->pid);
+            log_message("[INSTANCE] Removed dead PID %lu (%s)", to_free->pid, to_free->process_name);
             free(to_free);
         } else {
             prev = cur;
