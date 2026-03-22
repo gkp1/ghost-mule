@@ -14,7 +14,7 @@ Requirements:
 
 _You need a proxy ip, which you can get 10 for free from [webshare.io](https://www.webshare.io/) or other proxy sites. Just make a free account._
 
-### 1. Download the [Release .zip](https://github.com/gkp1/ghost-mule/releases/download/3.2.1/ProxyBridge-Windows-Portable-v3.2.1.zip) and extract it to any folder you want e.g Documents folder (+ send a shortcut of ProxyBridge.exe to your desktop)
+### 1. Download the [Release .zip](https://github.com/gkp1/ghost-mule/releases/download/v3.2.2/ProxyBridge-Windows-Portable-v3.2.2.zip) and extract it to any folder you want e.g Documents folder (+ send a shortcut of ProxyBridge.exe to your desktop)
 
 ### 2. Run ProxyBridge.exe as admin, and allow all network permissions when prompted so it can intercept+proxy requests etc
 
